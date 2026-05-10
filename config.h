@@ -1,4 +1,4 @@
-/*
+/*Anwar Atawna
  * config.h
  * --------
  * Constants and IPC keys for the traffic light system.
