@@ -1,4 +1,4 @@
-/*
+/*An example of using shared memory and semaphores for IPC in C.
  * main.c (Stage 2 — SHM + Semaphores)
  * ------------------------------------
  * Now uses ipc_init() and sem_lock/unlock() to safely write to SHM.
