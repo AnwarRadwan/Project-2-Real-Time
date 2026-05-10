@@ -1,7 +1,4 @@
 /*
-Author: Yassine Oualid
-Group 1
-Project 2
  * config.h
  * --------
  * Constants and IPC keys for the traffic light system.
