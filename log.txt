@@ -1,0 +1,27 @@
+
+=== session start  ts=1778520573 ===
+[17:29:34][CTRL] Controller started — beginning traffic cycle
+[17:29:34][CTRL] Phase → N-S GREEN
+[17:29:34][CTRL] N-S GREEN  dur=10s  (N:0 S:0 vehicles)
+[17:29:34][LGTN] [LIGHT-NORTH] process started
+[17:29:34][LGTN] [LIGHT-NORTH] state → GREEN
+[17:29:34][LGTS] [LIGHT-SOUTH] process started
+[17:29:34][LGTS] [LIGHT-SOUTH] state → GREEN
+[17:29:34][LGTE] [LIGHT-EAST] process started
+[17:29:34][LGTE] [LIGHT-EAST] state → RED
+[17:29:34][LGTW] [LIGHT-WEST] process started
+[17:29:34][LGTW] [LIGHT-WEST] state → RED
+[17:29:34][SAFE] Safety monitor started
+[17:29:34][VDET] [VDET] vehicle detector started
+[17:29:44][CTRL] Phase → N-S YELLOW
+[17:29:44][LGTN] [LIGHT-NORTH] state → YELLOW
+[17:29:44][LGTS] [LIGHT-SOUTH] state → YELLOW
+[17:29:47][CTRL] Phase → ALL-RED (1)
+[17:29:47][LGTN] [LIGHT-NORTH] state → RED
+[17:29:47][LGTS] [LIGHT-SOUTH] state → RED
+[17:29:49][CTRL] Phase → E-W GREEN
+[17:29:49][CTRL] E-W GREEN  dur=10s  (E:0 W:0 vehicles)
+[17:29:49][LGTE] [LIGHT-EAST] state → GREEN
+[17:29:49][LGTW] [LIGHT-WEST] state → GREEN
+=== session end    ts=1778520591 ===
+
