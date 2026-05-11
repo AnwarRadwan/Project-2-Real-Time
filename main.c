@@ -1,77 +1,169 @@
-/*An example of using shared memory and semaphores for IPC in C.
- * main.c (Stage 2 — SHM + Semaphores)
- * ------------------------------------
- * Now uses ipc_init() and sem_lock/unlock() to safely write to SHM.
+/*
+ * main.c  —  Anwar Atawna
+ * -----------------------
+ * Master / supervisor process.
  *
- * Compile: gcc -Wall main.c ipc.c -o main
- * Run:     ./main
+ * Responsibilities:
+ *   1. Create all IPC objects (SHM, semaphores, message queue).
+ *   2. Fork + exec every child process in the correct startup order.
+ *   3. Monitor children; on SIGINT/SIGTERM set shutdown flag, SIGTERM
+ *      all children, wait for them, then destroy IPC.
+ *
+ * Startup order:
+ *   logger     — must be running before anyone sends MSG_LOG.
+ *   controller — sets initial light states before traffic_light attaches.
+ *   everything else.
+ *
+ * Usage:
+ *   ./main            interactive mode
+ *   ./main --auto     fully automatic demo (recommended for demos)
  */
 
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
-
 
 #include "config.h"
 #include "ipc.h"
 #include "shared.h"
 
+static SharedData *g_shm   = NULL;
+static pid_t       g_pids[32];
+static int         g_npids = 0;
+static volatile sig_atomic_t g_shutdown = 0;
 
-static SharedData *g_shm = NULL;
+static void on_signal(int sig) { (void)sig; g_shutdown = 1; }
 
-static void cleanup_and_exit(int sig) {
-  (void)sig;
-  printf("\n[MAIN] caught signal — cleaning up...\n");
-  ipc_destroy();
-  exit(0);
+static pid_t spawn(const char *path, char *const argv[]) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        execv(path, argv);
+        perror(path);
+        exit(1);
+    }
+    if (pid < 0) { perror("fork"); return -1; }
+    g_pids[g_npids++] = pid;
+    printf("[MAIN] started %-22s pid=%d\n", path, pid);
+    fflush(stdout);
+    return pid;
 }
 
-int main(void) {
-  /* 1. Initialize IPC (SHM + semaphore) */
-  g_shm = ipc_init();
-  if (g_shm == NULL) {
-    fprintf(stderr, "[MAIN] ipc_init failed.\n");
-    return 1;
-  }
+static void shutdown_all(void) {
+    printf("\n[MAIN] shutdown — signalling all child processes...\n");
+    fflush(stdout);
 
-  signal(SIGINT, cleanup_and_exit);
-  signal(SIGTERM, cleanup_and_exit);
-
-  /* 2. Initialize SHM contents — under lock */
-  sem_lock();
-  memset(g_shm, 0, sizeof(SharedData));
-  g_shm->light[NORTH] = GREEN;
-  g_shm->light[SOUTH] = GREEN;
-  g_shm->light[EAST] = RED;
-  g_shm->light[WEST] = RED;
-  g_shm->vehicle_count[NORTH] = 3;
-  g_shm->vehicle_count[SOUTH] = 1;
-  g_shm->vehicle_count[EAST] = 0;
-  g_shm->vehicle_count[WEST] = 2;
-  sem_unlock();
-
-  printf("[MAIN] SHM initialized.\n");
-  printf("[MAIN] Run ./reader in another terminal. Ctrl+C to exit.\n");
-
-  /* 3. Periodically modify SHM under lock */
-  int counter = 0;
-  while (1) {
-    sleep(2);
-    counter++;
-
-    sem_lock();
-    g_shm->vehicle_count[NORTH] = counter;
-    if (counter % 5 == 0) {
-      g_shm->light[EAST] = (g_shm->light[EAST] == RED) ? GREEN : RED;
+    if (g_shm) {
+        sem_lock();
+        g_shm->shutdown = 1;
+        sem_unlock();
     }
+    sleep(1);   /* let processes notice the SHM flag */
+
+    for (int i = 0; i < g_npids; i++)
+        if (g_pids[i] > 0) kill(g_pids[i], SIGTERM);
+
+    int status;
+    pid_t pid;
+    while ((pid = wait(&status)) > 0) {
+        for (int i = 0; i < g_npids; i++) {
+            if (g_pids[i] != pid) continue;
+            if (WIFEXITED(status))
+                printf("[MAIN] pid=%-6d exited   status=%d\n",
+                       pid, WEXITSTATUS(status));
+            else if (WIFSIGNALED(status))
+                printf("[MAIN] pid=%-6d killed   signal=%d\n",
+                       pid, WTERMSIG(status));
+            g_pids[i] = -1;
+            break;
+        }
+    }
+}
+
+int main(int argc, char *argv[]) {
+    int auto_mode = (argc > 1 && strcmp(argv[1], "--auto") == 0);
+
+    signal(SIGINT,  on_signal);
+    signal(SIGTERM, on_signal);
+    signal(SIGCHLD, SIG_DFL);
+
+    printf("=================================================\n");
+    printf("  Real-Time Traffic Light Control System\n");
+    printf("  Anwar Atawna — Linux IPC Project\n");
+    printf("=================================================\n");
+    printf("[MAIN] mode : %s\n", auto_mode ? "AUTOMATIC" : "INTERACTIVE");
+    printf("[MAIN] Ctrl+C to stop\n\n");
+    fflush(stdout);
+
+    /* 1. Create all IPC objects */
+    g_shm = ipc_init();
+    if (!g_shm) { fprintf(stderr, "[MAIN] ipc_init failed\n"); return 1; }
+
+    /* 2. Safe initial SHM state — all lights RED until controller starts */
+    sem_lock();
+    memset(g_shm, 0, sizeof(SharedData));
+    g_shm->running  = 1;
+    g_shm->shutdown = 0;
+    for (int d = 0; d < NUM_DIRECTIONS; d++) g_shm->light[d] = RED;
     sem_unlock();
 
-    printf("[MAIN] tick %d  (wrote vehicle_count[N]=%d under lock)\n", counter,
-           counter);
-  }
+    /* 3. Spawn processes in dependency order */
 
-  ipc_destroy();
-  return 0;
+    { char *a[] = {"./logger",    NULL}; spawn("./logger", a); }
+    usleep(150 * 1000);   /* logger needs 150 ms to open the queue */
+
+    { char *a[] = {"./controller", NULL}; spawn("./controller", a); }
+    usleep(200 * 1000);   /* controller writes initial SHM light states */
+
+    /* Four traffic_light processes, one per direction */
+    char *la[4][3] = {
+        {"./traffic_light", "0", NULL},
+        {"./traffic_light", "1", NULL},
+        {"./traffic_light", "2", NULL},
+        {"./traffic_light", "3", NULL},
+    };
+    for (int d = 0; d < NUM_DIRECTIONS; d++) spawn("./traffic_light", la[d]);
+
+    { char *a[] = {"./vehicle_detector", NULL}; spawn("./vehicle_detector", a); }
+
+    if (auto_mode) {
+        char *a[] = {"./pedestrian", "--auto", NULL}; spawn("./pedestrian", a);
+    } else {
+        char *a[] = {"./pedestrian", NULL};           spawn("./pedestrian", a);
+    }
+
+    if (auto_mode) {
+        char *a[] = {"./emergency", "--auto", NULL};  spawn("./emergency", a);
+    } else {
+        char *a[] = {"./emergency", NULL};            spawn("./emergency", a);
+    }
+
+    { char *a[] = {"./safety_monitor", NULL}; spawn("./safety_monitor", a); }
+
+    printf("\n[MAIN] %d processes running — system operational.\n\n", g_npids);
+    fflush(stdout);
+
+    /* 4. Wait for shutdown signal or controller exit */
+    while (!g_shutdown) {
+        sleep(1);
+        sem_lock();
+        int running = g_shm->running;
+        sem_unlock();
+        if (!running) {
+            printf("[MAIN] controller signalled stop\n");
+            break;
+        }
+    }
+
+    /* 5. Graceful shutdown */
+    shutdown_all();
+
+    /* 6. Destroy all IPC */
+    printf("[MAIN] destroying IPC...\n");
+    ipc_destroy();
+    printf("[MAIN] done.\n");
+    return 0;
 }
