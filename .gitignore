@@ -16,3 +16,4 @@ reader
 # Core dumps
 core
 core.*
+log.txt
