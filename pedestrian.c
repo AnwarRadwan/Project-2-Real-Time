@@ -96,10 +96,14 @@ int main(int argc, char *argv[]) {
             fflush(stdout);
         }
 
-        /* Show status while walking */
-        if (active) {
+        /* Show status once when walk signal first becomes active */
+        static int walk_printed = 0;
+        if (active && !walk_printed) {
             printf("[PED] ** WALK SIGNAL ACTIVE **\n");
             fflush(stdout);
+            walk_printed = 1;
+        } else if (!active) {
+            walk_printed = 0;
         }
 
         if (!pending) {
