@@ -224,11 +224,26 @@ static void handle_emergency(int *cur) {
         check_msgs();   /* a second emergency can be queued here */
     }
 
+    /* Safety rule: emergency direction was GREEN — must go through YELLOW.
+     * There is no dedicated "emergency YELLOW" phase, so we set just that
+     * one direction to YELLOW manually, others stay RED.               */
+    sem_lock();
+    g_shm->light[g_emergency_dir] = YELLOW;
+    g_shm->last_update = time(NULL);
+    sem_unlock();
+    {   Message cmd;
+        build_cmd_message(&cmd, g_emergency_dir, YELLOW);
+        msg_send(&cmd); }
+    log_event("Emergency direction %s → YELLOW (safety transition)",
+              dir_str(g_emergency_dir));
+    for (int t = 0; t < YELLOW_DURATION && g_running; t++) sleep(1);
+
     apply_phase(PHASE_ALL_RED_1);
     for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
     apply_phase(PHASE_NS_GREEN);
     *cur = PHASE_NS_GREEN;
     log_event("Emergency cleared — resuming normal cycle");
+    sleep(1);   /* let traffic_light processes process GREEN cmd before we continue */
 }
 
 /* ------------------------------------------------------------------ */
