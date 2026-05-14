@@ -335,46 +335,27 @@ public class ReservationSystem {
 
     static void displayOccupancyReport() {
         System.out.println("\n==========================================");
-        System.out.println("        OCCUPANCY AND FARE REPORT");
+        System.out.println("             FARE REPORT");
         System.out.println("==========================================");
 
-        int busiestTaxiIndex   = 0;
-        int maxPassengers      = 0;
         int totalSystemRevenue = 0;
 
         for (int t = 0; t < 3; t++) {
             int reserved  = countReservedSeatsInTaxi(t);
             int available = 7 - reserved;
-            int percent   = (reserved * 100) / 7;
             int revenue   = reserved * fares[t];
 
             totalSystemRevenue += revenue;
-
-            if (reserved > maxPassengers) {
-                maxPassengers    = reserved;
-                busiestTaxiIndex = t;
-            }
 
             System.out.println("\nTaxi " + (t + 1) + ": " + getTaxiName(t));
             System.out.println("------------------------------------------");
             System.out.println("  Reserved  : " + reserved + " / 7 seats");
             System.out.println("  Available : " + available + " seats");
-            System.out.println("  Occupancy : " + percent + "%");
             System.out.println("  Fare/Seat : " + fares[t] + " NIS");
             System.out.println("  Revenue   : " + revenue + " NIS");
         }
 
         System.out.println("\n==========================================");
-        System.out.println("SUMMARY");
-        System.out.println("==========================================");
-
-        if (maxPassengers == 0) {
-            System.out.println("  No reservations yet. All taxis are empty.");
-        } else {
-            System.out.println("  Busiest Taxi  : " + getTaxiName(busiestTaxiIndex)
-                    + " (" + maxPassengers + " passengers)");
-        }
-
         System.out.println("  Total Revenue : " + totalSystemRevenue + " NIS");
         System.out.println("==========================================");
     }
