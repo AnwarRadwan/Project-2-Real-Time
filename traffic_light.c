@@ -1,17 +1,25 @@
 /*
- * traffic_light.c
- * ----------------
- * One process per direction (NORTH/SOUTH/EAST/WEST).
- * Usage: ./traffic_light <direction>
- *   where direction = 0 (N), 1 (S), 2 (E), 3 (W)
+ * traffic_light.c  —  Anwar Atawna
+ * ----------------------------------
+ * Represents one traffic light (one process per direction).
+ * Usage:  ./traffic_light <direction>    0=NORTH  1=SOUTH  2=EAST  3=WEST
  *
- * Responsibilities (per project spec, Section 2):
- *  - Maintain awareness of its current light state (read from SHM).
- *  - Receive control commands from the Controller via MSG_CMD.
- *  - Report state changes (print to terminal).
- *  - Send MSG_CONFIRM back to the Controller.
- *  - Send MSG_LOG to the logger when state changes.
- *  - Report errors if SHM state does not match the commanded state.
+ * Responsibilities:
+ *   - Receive state-change commands from the controller.
+ *   - Verify that SHM matches the commanded state (integrity check).
+ *   - Send MSG_CONFIRM back to the controller.
+ *   - Send MSG_LOG on every state change.
+ *   - Poll SHM periodically to catch any missed commands.
+ *
+ * IPC decisions:
+ *   MSG_CMD_FOR(direction): each light listens ONLY on its own mtype
+ *   (11=NORTH, 12=SOUTH, 13=EAST, 14=WEST).  msgrcv() filters at the
+ *   kernel level — no application-level routing, no race between lights.
+ *
+ *   SHM is the authoritative state; the command message is a notification.
+ *   If the message and SHM disagree we log the discrepancy and trust SHM.
+ *
+ *   Poll interval: 100 ms — responsive without burning CPU.
  */
 
 #include <errno.h>
@@ -22,202 +30,182 @@
 #include <time.h>
 #include <unistd.h>
 
-
 #include "config.h"
 #include "ipc.h"
 #include "shared.h"
 
+static int                    g_dir       = -1;
+static SharedData            *g_shm       = NULL;
+static int                    g_last      = -1;   /* last known straight state */
+static int                    g_last_left = -1;   /* last known left-turn state */
+static volatile sig_atomic_t  g_running   =  1;
 
-/* ---------- Global state for this process ---------- */
-static int g_direction = -1;       /* which direction this process handles */
-static SharedData *g_shm = NULL;   /* attached shared memory */
-static int g_last_seen_light = -1; /* last light state we observed */
-static volatile sig_atomic_t g_running = 1;
+static void on_signal(int sig) { (void)sig; g_running = 0; }
 
-/* ---------- Signal handler for graceful shutdown ---------- */
-static void on_sigterm(int sig) {
-  (void)sig;
-  g_running = 0;
-}
-
-/* ---------- Helper: send confirmation back to controller ---------- */
-static void send_confirmation(int new_state) {
-  Message m;
-  memset(&m, 0, sizeof(m));
-  m.mtype = MSG_CONFIRM;
-  m.source = g_direction; /* who is reporting */
-  m.direction = g_direction;
-  m.value = new_state;
-  m.timestamp = time(NULL);
-  snprintf(m.message, sizeof(m.message), "Light %s changed to %s",
-           dir_str(g_direction), light_str(new_state));
-
-  if (msg_send(&m) < 0) {
-    fprintf(stderr, "[LIGHT %s] failed to send confirmation\n",
-            dir_str(g_direction));
-  }
-}
-
-/* ---------- Helper: send log message ---------- */
+/* ------------------------------------------------------------------ */
+/* Send a log message to the logger process                            */
+/* ------------------------------------------------------------------ */
 static void send_log(const char *text) {
-  Message m;
-  memset(&m, 0, sizeof(m));
-  m.mtype = MSG_LOG;
-  m.source = g_direction;
-  m.direction = g_direction;
-  m.timestamp = time(NULL);
-  snprintf(m.message, sizeof(m.message), "%s", text);
-  /* best-effort: don't block on logger */
-  msg_send(&m);
+    Message m;
+    memset(&m, 0, sizeof(m));
+    m.mtype     = MSG_LOG;
+    m.source    = SRC_TRAFFIC_LIGHT + g_dir;
+    m.direction = g_dir;
+    m.timestamp = time(NULL);
+    snprintf(m.message, sizeof(m.message), "[LIGHT-%s] %s",
+             dir_str(g_dir), text);
+    msg_send(&m);
 }
 
-/* ---------- Handle a command targeted at this light ---------- */
+/* ------------------------------------------------------------------ */
+/* Send confirmation back to controller                                */
+/* ------------------------------------------------------------------ */
+static void send_confirm(int state) {
+    Message m;
+    memset(&m, 0, sizeof(m));
+    m.mtype     = MSG_CONFIRM;
+    m.source    = SRC_TRAFFIC_LIGHT + g_dir;
+    m.direction = g_dir;
+    m.value     = state;
+    m.timestamp = time(NULL);
+    snprintf(m.message, sizeof(m.message), "CONFIRM %s → %s",
+             dir_str(g_dir), light_str(state));
+    msg_send(&m);
+}
+
+/* ------------------------------------------------------------------ */
+/* Handle a command from the controller                                */
+/* ------------------------------------------------------------------ */
 static void handle_command(const Message *cmd) {
-  /* The controller sends: direction = which light, value = new state */
-  if (cmd->direction != g_direction) {
-    /* Not for us — but we already filtered by mtype, so this shouldn't happen.
-     * Keeping the check as a safety net. */
-    return;
-  }
+    int requested = cmd->value;
 
-  int requested = cmd->value;
-  if (requested != RED && requested != YELLOW && requested != GREEN) {
-    fprintf(stderr, "[LIGHT %s] invalid state requested: %d\n",
-            dir_str(g_direction), requested);
-    return;
-  }
-
-  /* Verify SHM matches the command (the controller writes SHM directly,
-   * then sends us the command — so by the time we read this message,
-   * SHM should already reflect the new state). */
-  sem_lock();
-  int actual = g_shm->light[g_direction];
-  sem_unlock();
-
-  if (actual != requested) {
-    char err[128];
-    snprintf(err, sizeof(err), "MISMATCH: cmd=%s but SHM=%s",
-             light_str(requested), light_str(actual));
-    fprintf(stderr, "[LIGHT %s] %s\n", dir_str(g_direction), err);
-    send_log(err);
-    return;
-  }
-
-  /* All good — print and confirm */
-  printf("[LIGHT %s] %s -> %s\n", dir_str(g_direction),
-         light_str(g_last_seen_light), light_str(requested));
-  fflush(stdout);
-
-  g_last_seen_light = requested;
-  send_confirmation(requested);
-
-  char log_msg[128];
-  snprintf(log_msg, sizeof(log_msg), "%s changed to %s", dir_str(g_direction),
-           light_str(requested));
-  send_log(log_msg);
-}
-
-/* ---------- Periodic SHM check (catches state changes we missed) ---------- */
-static void poll_shm_state(void) {
-  sem_lock();
-  int current = g_shm->light[g_direction];
-  int shutdown = g_shm->shutdown;
-  sem_unlock();
-
-  if (shutdown) {
-    g_running = 0;
-    return;
-  }
-
-  /* If SHM changed but we never got a command (e.g. controller updated
-   * SHM but message was lost), still print and log so the user sees it. */
-  if (current != g_last_seen_light && g_last_seen_light != -1) {
-    printf("[LIGHT %s] (observed) %s -> %s\n", dir_str(g_direction),
-           light_str(g_last_seen_light), light_str(current));
-    fflush(stdout);
-
-    char log_msg[128];
-    snprintf(log_msg, sizeof(log_msg),
-             "%s observed change to %s (no cmd received)", dir_str(g_direction),
-             light_str(current));
-    send_log(log_msg);
-
-    g_last_seen_light = current;
-  } else if (g_last_seen_light == -1) {
-    /* First poll — just record what we see */
-    g_last_seen_light = current;
-    printf("[LIGHT %s] initial state: %s\n", dir_str(g_direction),
-           light_str(current));
-    fflush(stdout);
-  }
-}
-
-/* ---------- Main loop ---------- */
-int main(int argc, char *argv[]) {
-  if (argc != 2) {
-    fprintf(stderr, "Usage: %s <direction 0..3>\n", argv[0]);
-    return 1;
-  }
-
-  g_direction = atoi(argv[1]);
-  if (g_direction < 0 || g_direction > 3) {
-    fprintf(stderr, "Invalid direction: %d (must be 0..3)\n", g_direction);
-    return 1;
-  }
-
-  /* Install signal handlers */
-  signal(SIGTERM, on_sigterm);
-  signal(SIGINT, on_sigterm);
-
-  /* Attach to existing IPC (created by main.c) */
-  g_shm = ipc_attach();
-  if (!g_shm) {
-    fprintf(stderr, "[LIGHT %s] ipc_attach failed\n", dir_str(g_direction));
-    return 1;
-  }
-
-  printf("[LIGHT %s] started (pid=%d)\n", dir_str(g_direction), getpid());
-  fflush(stdout);
-
-  char start_msg[128];
-  snprintf(start_msg, sizeof(start_msg), "Traffic light process %s started",
-           dir_str(g_direction));
-  send_log(start_msg);
-
-  /* Main loop: non-blocking message receive + periodic SHM check */
-  while (g_running) {
-    Message cmd;
-
-    /* Try to receive a command targeted at this direction.
-     *
-     * Trick: we use mtype = MSG_CMD * 10 + direction + 1 so each
-     * light can filter only its own commands. The controller must
-     * send commands with this encoding.
-     *
-     * Alternative: use mtype = MSG_CMD and check direction inside —
-     * but then ALL lights would race for the same message.
-     * The encoded mtype lets msgrcv() filter at the kernel level.
-     */
-    long my_mtype = MSG_CMD * 10 + g_direction + 1;
-
-    int n = msg_recv_type(&cmd, my_mtype, 1 /* non-blocking */);
-    if (n > 0) {
-      handle_command(&cmd);
-    } else if (n < 0 && errno != ENOMSG) {
-      /* Real error, not just "no message" */
-      perror("msg_recv");
+    if (requested != RED && requested != YELLOW && requested != GREEN) {
+        fprintf(stderr, "[LIGHT-%s] bad command value %d\n",
+                dir_str(g_dir), requested);
+        return;
     }
 
-    /* Periodic SHM check */
-    poll_shm_state();
+    /* Controller writes SHM before sending the message */
+    sem_lock();
+    int actual      = g_shm->light[g_dir];
+    int left_actual = g_shm->left_light[g_dir];
+    sem_unlock();
 
-    /* Sleep briefly to avoid busy-wait */
-    usleep(100 * 1000); /* 100 ms */
-  }
+    if (actual != requested) {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "CMD/SHM mismatch: cmd=%s shm=%s — using SHM",
+                 light_str(requested), light_str(actual));
+        fprintf(stderr, "[LIGHT-%s] %s\n", dir_str(g_dir), buf);
+        send_log(buf);
+        requested = actual;
+    }
 
-  /* Cleanup */
-  printf("[LIGHT %s] shutting down\n", dir_str(g_direction));
-  send_log("Traffic light process shutting down");
-  ipc_detach(g_shm);
-  return 0;
+    if (requested == g_last && left_actual == g_last_left)
+        return;   /* no change */
+
+    printf("[LIGHT-%s]  straight:%s→%s  left:%s→%s\n",
+           dir_str(g_dir),
+           (g_last      == -1) ? "INIT" : light_str(g_last),
+           light_str(requested),
+           (g_last_left == -1) ? "INIT" : light_str(g_last_left),
+           light_str(left_actual));
+    fflush(stdout);
+
+    char buf[128];
+    snprintf(buf, sizeof(buf), "straight→%s  left→%s",
+             light_str(requested), light_str(left_actual));
+    send_log(buf);
+    send_confirm(requested);
+    g_last      = requested;
+    g_last_left = left_actual;
+}
+
+/* ------------------------------------------------------------------ */
+/* Poll SHM — catches state changes if a command message was lost      */
+/* ------------------------------------------------------------------ */
+static void poll_shm(void) {
+    sem_lock();
+    int current      = g_shm->light[g_dir];
+    int left_current = g_shm->left_light[g_dir];
+    int shutdown     = g_shm->shutdown;
+    sem_unlock();
+
+    if (shutdown) { g_running = 0; return; }
+
+    if (g_last == -1) {
+        g_last      = current;
+        g_last_left = left_current;
+        printf("[LIGHT-%s] initial: straight=%s left=%s\n",
+               dir_str(g_dir), light_str(current), light_str(left_current));
+        fflush(stdout);
+        return;
+    }
+
+    if (current != g_last || left_current != g_last_left) {
+        printf("[LIGHT-%s] (SHM update) straight:%s→%s  left:%s→%s\n",
+               dir_str(g_dir),
+               light_str(g_last),      light_str(current),
+               light_str(g_last_left), light_str(left_current));
+        fflush(stdout);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "SHM update: straight→%s left→%s",
+                 light_str(current), light_str(left_current));
+        send_log(buf);
+        g_last      = current;
+        g_last_left = left_current;
+    }
+}
+
+/* ================================================================== */
+/* main                                                                 */
+/* ================================================================== */
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <direction 0..3>\n", argv[0]);
+        return 1;
+    }
+    g_dir = atoi(argv[1]);
+    if (g_dir < 0 || g_dir >= NUM_DIRECTIONS) {
+        fprintf(stderr, "Invalid direction %d (must be 0-3)\n", g_dir);
+        return 1;
+    }
+
+    signal(SIGTERM, on_signal);
+    signal(SIGINT,  on_signal);
+
+    g_shm = ipc_attach();
+    if (!g_shm) {
+        fprintf(stderr, "[LIGHT-%s] ipc_attach failed\n", dir_str(g_dir));
+        return 1;
+    }
+
+    printf("[LIGHT-%s] started (pid=%d)\n", dir_str(g_dir), getpid());
+    fflush(stdout);
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "process started");
+    send_log(buf);
+
+    /* Listen on the message type reserved for this direction */
+    long my_mtype = MSG_CMD_FOR(g_dir);
+
+    while (g_running) {
+        Message cmd;
+        int n = msg_recv(&cmd, my_mtype, 0);   /* non-blocking */
+        if (n > 0) {
+            handle_command(&cmd);
+        } else if (n < 0 && errno != ENOMSG) {
+            if (errno == EIDRM || errno == EINVAL) break;  /* queue gone */
+            perror("[LIGHT] msg_recv");
+        }
+
+        poll_shm();
+        usleep(100 * 1000);   /* 100 ms */
+    }
+
+    printf("[LIGHT-%s] shutting down\n", dir_str(g_dir));
+    send_log("process shutting down");
+    ipc_detach(g_shm);
+    return 0;
 }

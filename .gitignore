@@ -1,0 +1,19 @@
+# Compiled binaries
+main
+controller
+traffic_light
+vehicle_detector
+pedestrian
+emergency
+logger
+safety_monitor
+opengl_ui
+reader
+
+# Object files
+*.o
+
+# Core dumps
+core
+core.*
+log.txt
