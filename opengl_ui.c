@@ -3,27 +3,21 @@
  * --------------------------------
  * Real-time OpenGL/GLUT visualization of the traffic light system.
  *
- * What is drawn:
- *   - 4-way intersection (grey roads + dashed centre lines).
- *   - One traffic light per direction (3 coloured bulbs).
- *   - ANIMATED vehicles: cars slide toward intersection when GREEN,
- *     decelerate and stop when YELLOW, stay still when RED.
- *   - Status bar: phase + time remaining + vehicle counts.
- *   - Pedestrian crossing: flashing zebra stripes + WALK label.
- *   - Emergency: flashing red overlay + direction label.
- *   - Safety violation: red border + message.
+ * Layout (top-down view, right-hand traffic):
+ *   Each approach has two lanes:
+ *     Left lane  (closer to centre line) — left-turn-only cars
+ *     Right lane (away from centre line) — straight / right-turn cars
  *
- * Animation design:
- *   g_anim_offset[dir] is a sub-pixel offset (0..CAR_SPACING) that
- *   increases at CAR_SPEED px/s when GREEN and decelerates to 0 when RED.
- *   Each car is drawn at:  stop_line_distance = (i+1)*CAR_SPACING - offset
- *   When that distance ≤ 0 the car has entered the intersection and is
- *   not drawn, giving the illusion of continuous movement.
+ *   Each approach has two signal heads:
+ *     Main head   (3 circles R/Y/G)    — straight + right signal
+ *     Arrow head  (3 circles R/Y/G←)  — protected left-turn arrow
  *
- * IPC: read-only SHM attach; reads under sem_lock() every timer tick.
+ * Animation:
+ *   g_anim[d]      — rolling offset for straight/right lane (driven by light[d])
+ *   g_left_anim[d] — rolling offset for left-turn lane     (driven by left_light[d])
+ *   Cars advance toward the stop line when GREEN, decelerate when RED/YELLOW.
  *
- * Compile:  make opengl_ui
- * Run:      ./opengl_ui   (main system must be running first)
+ * IPC: read-only SHM attach; snapshot taken under sem_lock() every timer tick.
  */
 
 #include <math.h>
@@ -42,19 +36,26 @@
 /* ------------------------------------------------------------------ */
 /* Window / timing constants                                           */
 /* ------------------------------------------------------------------ */
-#define WIN_W        900
-#define WIN_H        700
-#define FPS           20    /* frames per second — smoother animation  */
-#define ROAD_W        80.0f /* half-width of each road arm             */
+#define WIN_W   940
+#define WIN_H   720
+#define FPS      20
+
+/* Road geometry — full road half-width (each side carries 2 lanes) */
+#define ROAD_W   80.0f
+
+/* Lane offsets from road centre (positive = away from centre line) */
+#define LANE_THROUGH  (ROAD_W * 0.62f)  /* straight / right lane centre */
+#define LANE_LEFT     (ROAD_W * 0.22f)  /* left-turn lane centre        */
 
 /* ------------------------------------------------------------------ */
 /* Car geometry                                                        */
 /* ------------------------------------------------------------------ */
-#define CAR_LEN      20.0f  /* length along travel direction           */
-#define CAR_WID      12.0f  /* width perpendicular to travel           */
-#define CAR_GAP       6.0f  /* bumper gap between cars                 */
-#define CAR_SPACING  (CAR_LEN + CAR_GAP)   /* 26 px per slot          */
-#define CAR_SPEED    40.0f  /* pixels per second when moving           */
+#define CAR_LEN      18.0f
+#define CAR_WID      11.0f
+#define CAR_GAP       5.0f
+#define CAR_SPACING  (CAR_LEN + CAR_GAP)
+#define CAR_SPEED    38.0f   /* px/s while moving */
+#define LEFT_CARS     3      /* fixed left-turn queue depth per direction */
 
 /* ------------------------------------------------------------------ */
 /* Global state                                                        */
@@ -63,11 +64,11 @@ static SharedData  g_snap;
 static SharedData *g_shm  = NULL;
 static int         g_tick = 0;
 
-/* Per-direction animation offset (0 .. CAR_SPACING, wraps) */
-static float g_anim[NUM_DIRECTIONS] = {0.0f, 0.0f, 0.0f, 0.0f};
+static float g_anim[NUM_DIRECTIONS]      = {0.0f, 0.0f, 0.0f, 0.0f};
+static float g_left_anim[NUM_DIRECTIONS] = {0.0f, 0.0f, 0.0f, 0.0f};
 
 /* ------------------------------------------------------------------ */
-/* Helpers                                                             */
+/* Drawing primitives                                                  */
 /* ------------------------------------------------------------------ */
 static void draw_circle(float cx, float cy, float r) {
     glBegin(GL_TRIANGLE_FAN);
@@ -103,7 +104,7 @@ static void draw_text18(float x, float y, const char *s) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Traffic light assembly                                              */
+/* Signal head colour helper                                           */
 /* ------------------------------------------------------------------ */
 static void set_bulb_color(int bulb_state, int active) {
     if (!active) { glColor3f(0.15f, 0.15f, 0.15f); return; }
@@ -115,42 +116,60 @@ static void set_bulb_color(int bulb_state, int active) {
     }
 }
 
-static void draw_traffic_light(float cx, float cy, int dir) {
-    int st = g_snap.light[dir];
-    float hw = 20.0f, hh = 62.0f, sp = 38.0f, r = 13.0f;
-
-    /* Housing */
+/* ------------------------------------------------------------------ */
+/* draw_signal_head: vertical 3-bulb housing                          */
+/* cx,cy = centre; hw,hh = half-widths; sp = bulb spacing; r = radius */
+/* ------------------------------------------------------------------ */
+static void draw_signal_head(float cx, float cy,
+                              float hw, float hh, float sp, float r,
+                              int st) {
     glColor3f(0.12f, 0.12f, 0.12f);
     draw_rect(cx, cy, hw, hh);
-    /* Pole */
     glColor3f(0.25f, 0.25f, 0.25f);
-    draw_rect(cx, cy - hh - 20.0f, 3.0f, 20.0f);
+    draw_rect(cx, cy - hh - 16.0f, 3.0f, 16.0f);   /* pole */
 
     set_bulb_color(RED,    st == RED);    draw_circle(cx, cy + sp, r);
     set_bulb_color(YELLOW, st == YELLOW); draw_circle(cx, cy,      r);
     set_bulb_color(GREEN,  st == GREEN);  draw_circle(cx, cy - sp, r);
-
-    /* Direction label */
-    glColor3f(1.0f, 1.0f, 1.0f);
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%s", dir_str(dir));
-    draw_text(cx - 12.0f, cy - hh - 15.0f, buf);
-    snprintf(buf, sizeof(buf), "Q:%d", g_snap.vehicle_count[dir]);
-    glColor3f(1.0f, 1.0f, 0.3f);
-    draw_text(cx - 10.0f, cy - hh - 27.0f, buf);
 }
 
 /* ------------------------------------------------------------------ */
-/* Draw one car (top-down view)                                        */
-/* cx,cy  = centre of the car                                         */
-/* vert   = 1 if travelling N-S, 0 if E-W                            */
-/* idx    = car index (for colour variety)                            */
+/* draw_traffic_light: main (larger) straight-signal head              */
+/* ------------------------------------------------------------------ */
+static void draw_traffic_light(float cx, float cy, int dir) {
+    int st = g_snap.light[dir];
+    draw_signal_head(cx, cy, 20.0f, 62.0f, 38.0f, 13.0f, st);
+
+    glColor3f(1.0f, 1.0f, 1.0f);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%s", dir_str(dir));
+    draw_text(cx - 12.0f, cy - 62.0f - 13.0f, buf);
+    snprintf(buf, sizeof(buf), "Q:%d", g_snap.vehicle_count[dir]);
+    glColor3f(1.0f, 1.0f, 0.3f);
+    draw_text(cx - 10.0f, cy - 62.0f - 25.0f, buf);
+}
+
+/* ------------------------------------------------------------------ */
+/* draw_left_signal: smaller left-turn arrow head                     */
+/*   Positioned adjacent to the main signal per direction.            */
+/*   An "←" label marks it as a left-turn arrow.                      */
+/* ------------------------------------------------------------------ */
+static void draw_left_signal(float cx, float cy, int dir) {
+    int lst = g_snap.left_light[dir];
+    draw_signal_head(cx, cy, 14.0f, 44.0f, 26.0f, 9.0f, lst);
+
+    /* "←" label */
+    glColor3f(0.9f, 0.9f, 0.9f);
+    draw_text(cx - 5.0f, cy - 44.0f - 10.0f, "<-");
+}
+
+/* ------------------------------------------------------------------ */
+/* Car drawing (top-down)                                              */
 /* ------------------------------------------------------------------ */
 static void draw_car(float cx, float cy, int vert, int idx) {
-    float bw = vert ? CAR_WID : CAR_LEN;   /* body half-width  */
-    float bh = vert ? CAR_LEN : CAR_WID;   /* body half-height */
+    float bw = vert ? CAR_WID : CAR_LEN;
+    float bh = vert ? CAR_LEN : CAR_WID;
 
-    /* Pick a body colour from a small palette */
     static const float palette[8][3] = {
         {0.85f,0.15f,0.15f}, {0.15f,0.40f,0.85f},
         {0.85f,0.70f,0.10f}, {0.85f,0.45f,0.10f},
@@ -161,93 +180,101 @@ static void draw_car(float cx, float cy, int vert, int idx) {
     glColor3f(palette[ci][0], palette[ci][1], palette[ci][2]);
     draw_rect(cx, cy, bw/2, bh/2);
 
-    /* Windshield (lighter rectangle) */
     glColor3f(0.7f, 0.85f, 1.0f);
-    draw_rect(cx, cy, bw/2 * 0.6f, bh/2 * 0.35f);
+    draw_rect(cx, cy, bw/2 * 0.55f, bh/2 * 0.35f);
 
-    /* Outline */
     glColor3f(0.0f, 0.0f, 0.0f);
     glLineWidth(1.0f);
     draw_rect_outline(cx, cy, bw/2, bh/2);
 }
 
 /* ------------------------------------------------------------------ */
-/* Draw all cars for one direction with animation                      */
-/*                                                                     */
-/* The "stop line" is the edge of the intersection box:               */
-/*   NORTH: y = cy + ROAD_W   (cars queue upward, positive y)        */
-/*   SOUTH: y = cy - ROAD_W   (cars queue downward, negative y)      */
-/*   EAST : x = cx + ROAD_W   (cars queue rightward)                 */
-/*   WEST : x = cx - ROAD_W   (cars queue leftward)                  */
-/*                                                                     */
-/* dist = how far a car is from the stop line (always ≥ 0 when       */
-/* queued). When GREEN, dist decreases → car moves toward the line.  */
-/* When dist ≤ 0 the car has entered the intersection; skip it.      */
+/* draw_through_cars: straight/right-turn lane                        */
+/* Lane offsets: NORTH/SOUTH use LANE_THROUGH along x-axis;           */
+/*               EAST/WEST  use LANE_THROUGH along y-axis.            */
 /* ------------------------------------------------------------------ */
-static void draw_cars(int dir) {
+static void draw_through_cars(int dir) {
     int count = g_snap.vehicle_count[dir];
     if (count <= 0) return;
 
-    float cx = WIN_W / 2.0f;
-    float cy = WIN_H / 2.0f;
-    float off = g_anim[dir];   /* rolling animation offset */
+    float cx  = WIN_W / 2.0f;
+    float cy  = WIN_H / 2.0f;
+    float off = g_anim[dir];
 
     for (int i = 0; i < count && i < MAX_VEHICLES_PER_DIR; i++) {
-        /* Distance from stop line for car i (slot i+1 back in queue) */
         float dist = (float)(i + 1) * CAR_SPACING - off;
-        if (dist <= CAR_LEN / 2.0f) continue;  /* entered intersection */
+        if (dist <= CAR_LEN / 2.0f) continue;
 
         float x, y;
         switch (dir) {
-        case NORTH:
-            /* Heading south: queue above intersection, lane left of centre */
-            x = cx - ROAD_W / 2.0f;
-            y = cy + ROAD_W + dist;
-            break;
-        case SOUTH:
-            /* Heading north: queue below intersection, lane right of centre */
-            x = cx + ROAD_W / 2.0f;
-            y = cy - ROAD_W - dist;
-            break;
-        case EAST:
-            /* Heading west: queue right of intersection, lane above centre */
-            x = cx + ROAD_W + dist;
-            y = cy + ROAD_W / 2.0f;
-            break;
-        case WEST:
-            /* Heading east: queue left of intersection, lane below centre */
-            x = cx - ROAD_W - dist;
-            y = cy - ROAD_W / 2.0f;
-            break;
+        case NORTH: x = cx - LANE_THROUGH; y = cy + ROAD_W + dist; break;
+        case SOUTH: x = cx + LANE_THROUGH; y = cy - ROAD_W - dist; break;
+        case EAST:  x = cx + ROAD_W + dist; y = cy + LANE_THROUGH; break;
+        case WEST:  x = cx - ROAD_W - dist; y = cy - LANE_THROUGH; break;
         default: continue;
         }
-
-        int vert = (dir == NORTH || dir == SOUTH);
-        draw_car(x, y, vert, i);
+        draw_car(x, y, (dir == NORTH || dir == SOUTH), i);
     }
 }
 
 /* ------------------------------------------------------------------ */
-/* Update animation offsets (called every timer tick)                 */
+/* draw_left_turn_cars: left-turn lane                                 */
+/* Cars are drawn closer to the centre line; fixed queue of LEFT_CARS */
+/* ------------------------------------------------------------------ */
+static void draw_left_turn_cars(int dir) {
+    float cx  = WIN_W / 2.0f;
+    float cy  = WIN_H / 2.0f;
+    float off = g_left_anim[dir];
+
+    for (int i = 0; i < LEFT_CARS; i++) {
+        float dist = (float)(i + 1) * CAR_SPACING - off;
+        if (dist <= CAR_LEN / 2.0f) continue;
+
+        float x, y;
+        switch (dir) {
+        case NORTH: x = cx - LANE_LEFT; y = cy + ROAD_W + dist; break;
+        case SOUTH: x = cx + LANE_LEFT; y = cy - ROAD_W - dist; break;
+        case EAST:  x = cx + ROAD_W + dist; y = cy + LANE_LEFT; break;
+        case WEST:  x = cx - ROAD_W - dist; y = cy - LANE_LEFT; break;
+        default: continue;
+        }
+        /* Use a distinct colour offset for left-turn cars */
+        draw_car(x, y, (dir == NORTH || dir == SOUTH), i + 4);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* update_anim: advance animation offsets each timer tick              */
 /* ------------------------------------------------------------------ */
 static void update_anim(void) {
     float dt = 1.0f / (float)FPS;
     for (int d = 0; d < NUM_DIRECTIONS; d++) {
+        /* Straight/right lane — driven by light[d] */
         if (g_snap.light[d] == GREEN) {
             g_anim[d] += CAR_SPEED * dt;
             if (g_anim[d] >= CAR_SPACING) g_anim[d] -= CAR_SPACING;
         } else {
-            /* Decelerate smoothly to 0 */
             if (g_anim[d] > 0.0f) {
                 g_anim[d] -= CAR_SPEED * dt * 1.5f;
                 if (g_anim[d] < 0.0f) g_anim[d] = 0.0f;
+            }
+        }
+
+        /* Left-turn lane — driven by left_light[d] */
+        if (g_snap.left_light[d] == GREEN) {
+            g_left_anim[d] += CAR_SPEED * dt;
+            if (g_left_anim[d] >= CAR_SPACING) g_left_anim[d] -= CAR_SPACING;
+        } else {
+            if (g_left_anim[d] > 0.0f) {
+                g_left_anim[d] -= CAR_SPEED * dt * 1.5f;
+                if (g_left_anim[d] < 0.0f) g_left_anim[d] = 0.0f;
             }
         }
     }
 }
 
 /* ------------------------------------------------------------------ */
-/* Intersection: roads + lane markings + zebra crossing               */
+/* draw_intersection: roads, lane dividers, stop lines, zebra          */
 /* ------------------------------------------------------------------ */
 static void draw_intersection(void) {
     float cx = WIN_W / 2.0f;
@@ -255,25 +282,48 @@ static void draw_intersection(void) {
 
     /* Road surface */
     glColor3f(0.30f, 0.30f, 0.30f);
-    draw_rect(cx,  WIN_H/2.0f, ROAD_W, WIN_H/2.0f);   /* N-S vertical  */
-    draw_rect(WIN_W/2.0f, cy,  WIN_W/2.0f, ROAD_W);   /* E-W horizontal */
+    draw_rect(cx,          WIN_H/2.0f, ROAD_W, WIN_H/2.0f);
+    draw_rect(WIN_W/2.0f,  cy,         WIN_W/2.0f, ROAD_W);
 
-    /* Slightly lighter intersection box */
+    /* Intersection box slightly lighter */
     glColor3f(0.34f, 0.34f, 0.34f);
     draw_rect(cx, cy, ROAD_W, ROAD_W);
 
-    /* Stop lines (white) */
+    /* ---- Lane dividers (dashed white) within each approach ---- */
+    glColor3f(0.9f, 0.9f, 0.9f);
+    glLineWidth(1.5f);
+    glBegin(GL_LINES);
+    /* NS road — lane divider at x = cx-LANE_LEFT*1.8 (between left and through lanes) */
+    {
+        float lx_n = cx - ROAD_W * 0.42f;   /* north side lane split */
+        float lx_s = cx + ROAD_W * 0.42f;   /* south side lane split */
+        float dash = 14.0f, gap = 10.0f;
+        for (float y = cy + ROAD_W; y < WIN_H; y += dash + gap) {
+            glVertex2f(lx_n, y); glVertex2f(lx_n, y + dash);
+        }
+        for (float y = 0; y < cy - ROAD_W; y += dash + gap) {
+            glVertex2f(lx_s, y); glVertex2f(lx_s, y + dash);
+        }
+        /* EW road */
+        float ly_e = cy + ROAD_W * 0.42f;
+        float ly_w = cy - ROAD_W * 0.42f;
+        for (float x = cx + ROAD_W; x < WIN_W; x += dash + gap) {
+            glVertex2f(x, ly_e); glVertex2f(x + dash, ly_e);
+        }
+        for (float x = 0; x < cx - ROAD_W; x += dash + gap) {
+            glVertex2f(x, ly_w); glVertex2f(x + dash, ly_w);
+        }
+    }
+    glEnd();
+
+    /* Stop lines (white, solid) */
     glColor3f(1.0f, 1.0f, 1.0f);
     glLineWidth(2.5f);
     glBegin(GL_LINES);
-    /* NORTH approach stop line */
-    glVertex2f(cx - ROAD_W, cy + ROAD_W); glVertex2f(cx, cy + ROAD_W);
-    /* SOUTH approach stop line */
-    glVertex2f(cx, cy - ROAD_W); glVertex2f(cx + ROAD_W, cy - ROAD_W);
-    /* EAST approach stop line */
-    glVertex2f(cx + ROAD_W, cy); glVertex2f(cx + ROAD_W, cy + ROAD_W);
-    /* WEST approach stop line */
-    glVertex2f(cx - ROAD_W, cy - ROAD_W); glVertex2f(cx - ROAD_W, cy);
+    glVertex2f(cx - ROAD_W, cy + ROAD_W); glVertex2f(cx, cy + ROAD_W);  /* N */
+    glVertex2f(cx, cy - ROAD_W); glVertex2f(cx + ROAD_W, cy - ROAD_W);  /* S */
+    glVertex2f(cx + ROAD_W, cy); glVertex2f(cx + ROAD_W, cy + ROAD_W);  /* E */
+    glVertex2f(cx - ROAD_W, cy - ROAD_W); glVertex2f(cx - ROAD_W, cy);  /* W */
     glEnd();
 
     /* Yellow dashed centre lines */
@@ -305,15 +355,13 @@ static void draw_intersection(void) {
         float stripe_h = 10.0f, stripe_gap = 16.0f;
         for (int i = 0; i < 4; i++) {
             float sy = cy - ROAD_W + 8.0f + (float)i * stripe_gap;
-            /* West side crossing */
             glBegin(GL_QUADS);
-            glVertex2f(cx - ROAD_W - 55, sy);   glVertex2f(cx - ROAD_W, sy);
-            glVertex2f(cx - ROAD_W, sy + stripe_h); glVertex2f(cx - ROAD_W - 55, sy + stripe_h);
+            glVertex2f(cx-ROAD_W-55,sy);    glVertex2f(cx-ROAD_W,sy);
+            glVertex2f(cx-ROAD_W,sy+stripe_h); glVertex2f(cx-ROAD_W-55,sy+stripe_h);
             glEnd();
-            /* East side crossing */
             glBegin(GL_QUADS);
-            glVertex2f(cx + ROAD_W, sy);   glVertex2f(cx + ROAD_W + 55, sy);
-            glVertex2f(cx + ROAD_W + 55, sy + stripe_h); glVertex2f(cx + ROAD_W, sy + stripe_h);
+            glVertex2f(cx+ROAD_W,sy);    glVertex2f(cx+ROAD_W+55,sy);
+            glVertex2f(cx+ROAD_W+55,sy+stripe_h); glVertex2f(cx+ROAD_W,sy+stripe_h);
             glEnd();
         }
         glDisable(GL_BLEND);
@@ -329,29 +377,42 @@ static void display(void) {
     float cx = WIN_W / 2.0f;
     float cy = WIN_H / 2.0f;
 
-    /* Grass background */
     glColor3f(0.13f, 0.24f, 0.13f);
     draw_rect(cx, cy, WIN_W/2.0f, WIN_H/2.0f);
 
     draw_intersection();
 
-    /* Traffic lights */
-    draw_traffic_light(cx,             cy + 215.0f, NORTH);
-    draw_traffic_light(cx,             cy - 215.0f, SOUTH);
-    draw_traffic_light(cx + 245.0f,    cy,          EAST);
-    draw_traffic_light(cx - 245.0f,    cy,          WEST);
+    /* ---- Vehicle queues ---- */
+    draw_through_cars(NORTH); draw_left_turn_cars(NORTH);
+    draw_through_cars(SOUTH); draw_left_turn_cars(SOUTH);
+    draw_through_cars(EAST);  draw_left_turn_cars(EAST);
+    draw_through_cars(WEST);  draw_left_turn_cars(WEST);
 
-    /* Animated vehicle queues */
-    draw_cars(NORTH);
-    draw_cars(SOUTH);
-    draw_cars(EAST);
-    draw_cars(WEST);
+    /* ---- Main straight signals ---- */
+    draw_traffic_light(cx,          cy + 215.0f, NORTH);
+    draw_traffic_light(cx,          cy - 215.0f, SOUTH);
+    draw_traffic_light(cx + 250.0f, cy,          EAST);
+    draw_traffic_light(cx - 250.0f, cy,          WEST);
+
+    /*
+     * Left-turn arrow signals — placed on the side toward which each
+     * direction turns left (driver's left = screen-right for N, etc.)
+     *
+     * NORTH heading south → turns left (East)  → signal right of main
+     * SOUTH heading north → turns left (West)  → signal left of main
+     * EAST  heading west  → turns left (South) → signal below main
+     * WEST  heading east  → turns left (North) → signal above main
+     */
+    draw_left_signal(cx + 55.0f,         cy + 215.0f, NORTH);
+    draw_left_signal(cx - 55.0f,         cy - 215.0f, SOUTH);
+    draw_left_signal(cx + 250.0f,        cy - 90.0f,  EAST);
+    draw_left_signal(cx - 250.0f,        cy + 90.0f,  WEST);
 
     /* ---- Status bar ---- */
     glColor3f(0.05f, 0.05f, 0.05f);
     glBegin(GL_QUADS);
-    glVertex2f(0, WIN_H-50); glVertex2f(WIN_W, WIN_H-50);
-    glVertex2f(WIN_W, WIN_H); glVertex2f(0, WIN_H);
+    glVertex2f(0,WIN_H-50); glVertex2f(WIN_W,WIN_H-50);
+    glVertex2f(WIN_W,WIN_H); glVertex2f(0,WIN_H);
     glEnd();
     glColor3f(1.0f, 1.0f, 1.0f);
     char status[256];
@@ -366,13 +427,9 @@ static void display(void) {
     /* ---- Pedestrian WALK label ---- */
     if (g_snap.pedestrian_active) {
         int blink = (g_tick / (FPS / 2)) % 2;
-        if (blink) {
-            glColor3f(1.0f, 1.0f, 0.0f);
-            draw_text18(cx - 22.0f, cy + 8.0f, "WALK");
-        }
+        if (blink) { glColor3f(1.0f,1.0f,0.0f); draw_text18(cx-22.0f,cy+8.0f,"WALK"); }
     }
 
-    /* ---- Pedestrian request indicator ---- */
     if (g_snap.pedestrian_request && !g_snap.pedestrian_active) {
         glColor3f(1.0f, 0.55f, 0.0f);
         draw_text(cx - 32.0f, cy + 95.0f, "PED REQUEST");
@@ -399,23 +456,25 @@ static void display(void) {
     if (g_snap.safety_violation) {
         glColor3f(1.0f, 0.0f, 0.0f);
         glLineWidth(5.0f);
-        draw_rect_outline(cx, (WIN_H - 50.0f) / 2.0f,
-                          WIN_W/2.0f - 3.0f, (WIN_H - 50.0f)/2.0f - 3.0f);
+        draw_rect_outline(cx, (WIN_H-50.0f)/2.0f,
+                          WIN_W/2.0f - 3.0f, (WIN_H-50.0f)/2.0f - 3.0f);
         glLineWidth(1.0f);
         glColor3f(1.0f, 0.3f, 0.3f);
         draw_text18(10.0f, WIN_H - 70.0f, g_snap.safety_msg);
     }
 
-    /* ---- Title ---- */
-    glColor3f(0.85f, 0.85f, 0.85f);
+    /* ---- Legend ---- */
+    glColor3f(0.75f, 0.75f, 0.75f);
     draw_text(5.0f, 8.0f,
-              "Traffic Light IPC System — Anwar Atawna   [Q/ESC to close]");
+              "Traffic Light IPC System — Anwar Atawna"
+              "   [Main signal = straight/right]   [Small signal = left-turn arrow]"
+              "   [Q/ESC close]");
 
     glutSwapBuffers();
 }
 
 /* ------------------------------------------------------------------ */
-/* Timer callback: update SHM snapshot + animation, schedule redraw   */
+/* Timer callback                                                      */
 /* ------------------------------------------------------------------ */
 static void timer_cb(int val) {
     (void)val;
@@ -433,7 +492,7 @@ static void timer_cb(int val) {
         }
     }
 
-    update_anim();          /* advance car animation offsets */
+    update_anim();
     glutPostRedisplay();
     glutTimerFunc(1000 / FPS, timer_cb, 0);
 }

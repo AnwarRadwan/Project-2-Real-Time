@@ -37,9 +37,10 @@
 #include "ipc.h"
 #include "shared.h"
 
-static SharedData            *g_shm    = NULL;
-static volatile sig_atomic_t  g_running = 1;
+static SharedData            *g_shm      = NULL;
+static volatile sig_atomic_t  g_running  = 1;
 static int                    g_prev[NUM_DIRECTIONS];
+static int                    g_prev_left[NUM_DIRECTIONS];
 
 static void on_signal(int sig) { (void)sig; g_running = 0; }
 
@@ -80,27 +81,56 @@ static void report_ok(void) {
 /* Evaluate all safety rules against the current snapshot             */
 /* ------------------------------------------------------------------ */
 static void check_safety(const SharedData *s) {
-    int ns = (s->light[NORTH] == GREEN || s->light[SOUTH] == GREEN);
-    int ew = (s->light[EAST]  == GREEN || s->light[WEST]  == GREEN);
+    int ns      = (s->light[NORTH]      == GREEN || s->light[SOUTH]      == GREEN);
+    int ew      = (s->light[EAST]       == GREEN || s->light[WEST]       == GREEN);
+    int ns_left = (s->left_light[NORTH] == GREEN || s->left_light[SOUTH] == GREEN);
+    int ew_left = (s->left_light[EAST]  == GREEN || s->left_light[WEST]  == GREEN);
 
-    /* Rule 1: conflicting green */
+    /* Rule 1a: conflicting straight greens */
     if (ns && ew) {
-        report_violation("N-S and E-W both GREEN — conflicting lights!");
+        report_violation("N-S and E-W both GREEN — conflicting straight lights!");
+        return;
+    }
+
+    /* Rule 1b: conflicting left-turn arrows */
+    if (ns_left && ew_left) {
+        report_violation("N-S and E-W left-turn arrows both GREEN — conflict!");
+        return;
+    }
+
+    /* Rule 1c: left-turn conflicts with opposing straight */
+    if (ns_left && ew) {
+        report_violation("N-S left-turn GREEN while E-W straight GREEN — conflict!");
+        return;
+    }
+    if (ew_left && ns) {
+        report_violation("E-W left-turn GREEN while N-S straight GREEN — conflict!");
         return;
     }
 
     /* Rule 2: pedestrian crossing while vehicles green */
-    if (s->pedestrian_active && (ns || ew)) {
+    if (s->pedestrian_active && (ns || ew || ns_left || ew_left)) {
         report_violation("Pedestrian walk signal while vehicle lights GREEN!");
         return;
     }
 
-    /* Rule 3: GREEN→RED without YELLOW */
+    /* Rule 3a: straight signal GREEN→RED without YELLOW */
     for (int d = 0; d < NUM_DIRECTIONS; d++) {
         if (g_prev[d] == GREEN && s->light[d] == RED) {
             char buf[128];
             snprintf(buf, sizeof(buf),
-                     "%s went GREEN→RED without YELLOW!", dir_str(d));
+                     "%s straight went GREEN→RED without YELLOW!", dir_str(d));
+            report_violation(buf);
+            return;
+        }
+    }
+
+    /* Rule 3b: left-turn arrow GREEN→RED without YELLOW */
+    for (int d = 0; d < NUM_DIRECTIONS; d++) {
+        if (g_prev_left[d] == GREEN && s->left_light[d] == RED) {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "%s left-turn went GREEN→RED without YELLOW!", dir_str(d));
             report_violation(buf);
             return;
         }
@@ -131,7 +161,10 @@ int main(void) {
 
     /* Capture initial light states */
     sem_lock();
-    for (int d = 0; d < NUM_DIRECTIONS; d++) g_prev[d] = g_shm->light[d];
+    for (int d = 0; d < NUM_DIRECTIONS; d++) {
+        g_prev[d]      = g_shm->light[d];
+        g_prev_left[d] = g_shm->left_light[d];
+    }
     sem_unlock();
 
     int ticks = 0;
@@ -163,7 +196,10 @@ int main(void) {
         }
 
         /* Save current states for next-cycle GREEN→RED check */
-        for (int d = 0; d < NUM_DIRECTIONS; d++) g_prev[d] = snap.light[d];
+        for (int d = 0; d < NUM_DIRECTIONS; d++) {
+            g_prev[d]      = snap.light[d];
+            g_prev_left[d] = snap.left_light[d];
+        }
 
         usleep(500 * 1000);   /* 500 ms check interval */
     }

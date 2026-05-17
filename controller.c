@@ -3,32 +3,27 @@
  * ------------------------------
  * The "brain" of the traffic light system.
  *
- * Normal cycle (fixed sequence, times are adaptive):
- *   PHASE_NS_GREEN  → PHASE_NS_YELLOW → PHASE_ALL_RED_1 →
- *   PHASE_EW_GREEN  → PHASE_EW_YELLOW → PHASE_ALL_RED_2 → (repeat)
+ * Full cycle (protected left-turn first):
+ *   PHASE_NS_LEFT_GREEN  → PHASE_NS_LEFT_YELLOW  → PHASE_ALL_RED_3 →
+ *   PHASE_NS_GREEN       → PHASE_NS_YELLOW        → PHASE_ALL_RED_1 →
+ *   PHASE_EW_LEFT_GREEN  → PHASE_EW_LEFT_YELLOW  → PHASE_ALL_RED_4 →
+ *   PHASE_EW_GREEN       → PHASE_EW_YELLOW        → PHASE_ALL_RED_2 → (repeat)
+ *
+ * Each direction carries two independent signals:
+ *   light[d]      — straight-through / right-turn signal
+ *   left_light[d] — protected left-turn arrow signal
  *
  * Interrupts (highest-priority first):
- *   EMERGENCY  — preempts any phase; clears intersection via YELLOW+ALL-RED
- *                before granting green to the emergency direction.
- *   PEDESTRIAN — preempts GREEN phases; goes YELLOW→ALL-RED→PEDESTRIAN.
+ *   EMERGENCY  — preempts any phase; clears via YELLOW+ALL-RED.
+ *   PEDESTRIAN — preempts any green phase (straight or left).
  *
- * IPC decisions:
- *   SHM        : controller is the ONLY process that writes light[] and
- *                phase fields. All writes happen under sem_lock().
- *   MSG_CMD_FOR: after writing SHM, send a directed message to each
- *                traffic_light process (mtype 11-14) for confirmation.
- *   MSG_PEDESTRIAN / MSG_EMERGENCY:
- *                non-blocking receive in check_msgs(), called every
- *                second in the green loop → response ≤ 1 second.
- *   MSG_LOG    : log every phase transition and special event.
+ * IPC:
+ *   SHM  : controller is the ONLY writer of light[] and left_light[].
+ *   MSG  : CMD messages carry both value (straight) and left_value.
+ *   LOG  : every phase transition logged.
  *
- * Adaptive green:
- *   duration = GREEN_DURATION + vehicle_count × GREEN_TIME_PER_VEHICLE
- *   clamped to [MIN_GREEN_DURATION, MAX_GREEN_DURATION].
- *
- * Safety guarantee:
- *   safe_to_allred() always inserts YELLOW before ALL-RED.
- *   GREEN → RED without YELLOW is structurally impossible.
+ * Adaptive green: applied to straight phases only.
+ * Left-turn phases use a fixed LEFT_GREEN_DURATION.
  */
 
 #include <errno.h>
@@ -47,7 +42,6 @@
 static SharedData            *g_shm    = NULL;
 static volatile sig_atomic_t  g_running = 1;
 
-/* Pending special-event flags (written by check_msgs, read by main loop) */
 static int g_want_pedestrian = 0;
 static int g_want_emergency  = 0;
 static int g_emergency_dir   = -1;
@@ -55,7 +49,7 @@ static int g_emergency_dir   = -1;
 static void on_signal(int sig) { (void)sig; g_running = 0; }
 
 /* ------------------------------------------------------------------ */
-/* Logging helper (printf + MSG_LOG to logger process)                 */
+/* Logging helper                                                       */
 /* ------------------------------------------------------------------ */
 static void log_event(const char *fmt, ...) {
     Message m;
@@ -73,7 +67,8 @@ static void log_event(const char *fmt, ...) {
 }
 
 /* ------------------------------------------------------------------ */
-/* apply_phase: write SHM + send CMD to all four traffic lights        */
+/* apply_phase: write both light[] and left_light[] to SHM, then      */
+/*              broadcast CMD messages to all four traffic_light procs */
 /* ------------------------------------------------------------------ */
 static void apply_phase(int phase) {
     sem_lock();
@@ -81,35 +76,69 @@ static void apply_phase(int phase) {
     g_shm->phase_start_time = time(NULL);
     g_shm->last_update      = time(NULL);
 
+    /* Default: all left-turn arrows off */
+    for (int d = 0; d < NUM_DIRECTIONS; d++) g_shm->left_light[d] = RED;
+
     switch (phase) {
+
+    case PHASE_NS_LEFT_GREEN:
+        for (int d = 0; d < NUM_DIRECTIONS; d++) g_shm->light[d] = RED;
+        g_shm->left_light[NORTH] = GREEN; g_shm->left_light[SOUTH] = GREEN;
+        g_shm->pedestrian_active = 0;     g_shm->emergency_mode    = 0;
+        break;
+
+    case PHASE_NS_LEFT_YELLOW:
+        for (int d = 0; d < NUM_DIRECTIONS; d++) g_shm->light[d] = RED;
+        g_shm->left_light[NORTH] = YELLOW; g_shm->left_light[SOUTH] = YELLOW;
+        break;
+
     case PHASE_NS_GREEN:
         g_shm->light[NORTH] = GREEN;  g_shm->light[SOUTH] = GREEN;
         g_shm->light[EAST]  = RED;    g_shm->light[WEST]  = RED;
         g_shm->pedestrian_active = 0; g_shm->emergency_mode = 0;
         break;
+
     case PHASE_NS_YELLOW:
         g_shm->light[NORTH] = YELLOW; g_shm->light[SOUTH] = YELLOW;
         g_shm->light[EAST]  = RED;    g_shm->light[WEST]  = RED;
         break;
+
     case PHASE_ALL_RED_1:
     case PHASE_ALL_RED_2:
+    case PHASE_ALL_RED_3:
+    case PHASE_ALL_RED_4:
         for (int d = 0; d < NUM_DIRECTIONS; d++) g_shm->light[d] = RED;
         break;
+
+    case PHASE_EW_LEFT_GREEN:
+        for (int d = 0; d < NUM_DIRECTIONS; d++) g_shm->light[d] = RED;
+        g_shm->left_light[EAST] = GREEN; g_shm->left_light[WEST] = GREEN;
+        g_shm->pedestrian_active = 0;    g_shm->emergency_mode   = 0;
+        break;
+
+    case PHASE_EW_LEFT_YELLOW:
+        for (int d = 0; d < NUM_DIRECTIONS; d++) g_shm->light[d] = RED;
+        g_shm->left_light[EAST] = YELLOW; g_shm->left_light[WEST] = YELLOW;
+        break;
+
     case PHASE_EW_GREEN:
         g_shm->light[NORTH] = RED;    g_shm->light[SOUTH] = RED;
         g_shm->light[EAST]  = GREEN;  g_shm->light[WEST]  = GREEN;
         g_shm->pedestrian_active = 0; g_shm->emergency_mode = 0;
         break;
+
     case PHASE_EW_YELLOW:
         g_shm->light[NORTH] = RED;    g_shm->light[SOUTH] = RED;
         g_shm->light[EAST]  = YELLOW; g_shm->light[WEST]  = YELLOW;
         break;
+
     case PHASE_PEDESTRIAN:
         for (int d = 0; d < NUM_DIRECTIONS; d++) g_shm->light[d] = RED;
         g_shm->pedestrian_active  = 1;
         g_shm->pedestrian_request = 0;
         g_shm->emergency_mode     = 0;
         break;
+
     case PHASE_EMERGENCY:
         for (int d = 0; d < NUM_DIRECTIONS; d++) g_shm->light[d] = RED;
         g_shm->light[g_emergency_dir] = GREEN;
@@ -120,15 +149,18 @@ static void apply_phase(int phase) {
         break;
     }
 
-    /* Snapshot light states before releasing the lock */
-    int lights[NUM_DIRECTIONS];
-    for (int d = 0; d < NUM_DIRECTIONS; d++) lights[d] = g_shm->light[d];
+    /* Snapshot both signal arrays before releasing the lock */
+    int lights[NUM_DIRECTIONS], lefts[NUM_DIRECTIONS];
+    for (int d = 0; d < NUM_DIRECTIONS; d++) {
+        lights[d] = g_shm->light[d];
+        lefts[d]  = g_shm->left_light[d];
+    }
     sem_unlock();
 
     /* Notify each traffic_light process via its own message type */
     for (int d = 0; d < NUM_DIRECTIONS; d++) {
         Message cmd;
-        build_cmd_message(&cmd, d, lights[d]);
+        build_cmd_message(&cmd, d, lights[d], lefts[d]);
         msg_send(&cmd);
     }
 
@@ -136,12 +168,11 @@ static void apply_phase(int phase) {
 }
 
 /* ------------------------------------------------------------------ */
-/* check_msgs: drain pending requests (non-blocking, call every sec)   */
+/* check_msgs: drain pending requests (non-blocking)                   */
 /* ------------------------------------------------------------------ */
 static void check_msgs(void) {
     Message m;
 
-    /* Pedestrian requests */
     while (msg_recv(&m, MSG_PEDESTRIAN, 0) > 0) {
         if (!g_want_pedestrian && !g_want_emergency) {
             g_want_pedestrian = 1;
@@ -152,7 +183,6 @@ static void check_msgs(void) {
         }
     }
 
-    /* Emergency requests — highest priority */
     while (msg_recv(&m, MSG_EMERGENCY, 0) > 0) {
         g_want_emergency = 1;
         g_emergency_dir  = m.direction;
@@ -162,7 +192,7 @@ static void check_msgs(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Adaptive green duration based on vehicle queue lengths              */
+/* Adaptive green duration (straight phases only)                      */
 /* ------------------------------------------------------------------ */
 static int green_duration(int d1, int d2) {
     sem_lock();
@@ -175,10 +205,20 @@ static int green_duration(int d1, int d2) {
 }
 
 /* ------------------------------------------------------------------ */
-/* safe_to_allred: enforce GREEN→YELLOW→RED rule before every ALL-RED  */
+/* safe_to_allred: enforce GREEN→YELLOW→RED rule for all phase types   */
 /* ------------------------------------------------------------------ */
 static void safe_to_allred(int cur_phase) {
     switch (cur_phase) {
+    case PHASE_NS_LEFT_GREEN:
+        apply_phase(PHASE_NS_LEFT_YELLOW);
+        for (int t = 0; t < YELLOW_DURATION && g_running; t++) sleep(1);
+        apply_phase(PHASE_ALL_RED_3);
+        for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
+        break;
+    case PHASE_NS_LEFT_YELLOW:
+        apply_phase(PHASE_ALL_RED_3);
+        for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
+        break;
     case PHASE_NS_GREEN:
         apply_phase(PHASE_NS_YELLOW);
         for (int t = 0; t < YELLOW_DURATION && g_running; t++) sleep(1);
@@ -187,6 +227,16 @@ static void safe_to_allred(int cur_phase) {
         break;
     case PHASE_NS_YELLOW:
         apply_phase(PHASE_ALL_RED_1);
+        for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
+        break;
+    case PHASE_EW_LEFT_GREEN:
+        apply_phase(PHASE_EW_LEFT_YELLOW);
+        for (int t = 0; t < YELLOW_DURATION && g_running; t++) sleep(1);
+        apply_phase(PHASE_ALL_RED_4);
+        for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
+        break;
+    case PHASE_EW_LEFT_YELLOW:
+        apply_phase(PHASE_ALL_RED_4);
         for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
         break;
     case PHASE_EW_GREEN:
@@ -221,18 +271,16 @@ static void handle_emergency(int *cur) {
 
     for (int t = 0; t < EMERGENCY_DURATION && g_running; t++) {
         sleep(1);
-        check_msgs();   /* a second emergency can be queued here */
+        check_msgs();
     }
 
-    /* Safety rule: emergency direction was GREEN — must go through YELLOW.
-     * There is no dedicated "emergency YELLOW" phase, so we set just that
-     * one direction to YELLOW manually, others stay RED.               */
+    /* Emergency direction was GREEN — must pass through YELLOW */
     sem_lock();
     g_shm->light[g_emergency_dir] = YELLOW;
     g_shm->last_update = time(NULL);
     sem_unlock();
     {   Message cmd;
-        build_cmd_message(&cmd, g_emergency_dir, YELLOW);
+        build_cmd_message(&cmd, g_emergency_dir, YELLOW, RED);
         msg_send(&cmd); }
     log_event("Emergency direction %s → YELLOW (safety transition)",
               dir_str(g_emergency_dir));
@@ -240,10 +288,10 @@ static void handle_emergency(int *cur) {
 
     apply_phase(PHASE_ALL_RED_1);
     for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
-    apply_phase(PHASE_NS_GREEN);
-    *cur = PHASE_NS_GREEN;
+    apply_phase(PHASE_NS_LEFT_GREEN);
+    *cur = PHASE_NS_LEFT_GREEN;
     log_event("Emergency cleared — resuming normal cycle");
-    sleep(1);   /* let traffic_light processes process GREEN cmd before we continue */
+    sleep(1);
 }
 
 /* ------------------------------------------------------------------ */
@@ -262,14 +310,15 @@ static void handle_pedestrian(int *cur) {
     for (int t = 0; t < PEDESTRIAN_DURATION && g_running; t++) {
         sleep(1);
         check_msgs();
-        if (g_want_emergency) return;   /* emergency interrupts crossing */
+        if (g_want_emergency) return;
     }
 
     apply_phase(PHASE_ALL_RED_1);
     for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
-    apply_phase(PHASE_NS_GREEN);
-    *cur = PHASE_NS_GREEN;
+    apply_phase(PHASE_NS_LEFT_GREEN);
+    *cur = PHASE_NS_LEFT_GREEN;
     log_event("Pedestrian crossing complete — resuming normal cycle");
+    sleep(1);
 }
 
 /* ================================================================== */
@@ -290,9 +339,9 @@ int main(void) {
     printf("[CTRL] controller started (pid=%d)\n", getpid());
     log_event("Controller started — beginning traffic cycle");
 
-    /* Start with N-S green */
-    apply_phase(PHASE_NS_GREEN);
-    int cur = PHASE_NS_GREEN;
+    /* Start with N-S protected left-turn */
+    apply_phase(PHASE_NS_LEFT_GREEN);
+    int cur = PHASE_NS_LEFT_GREEN;
 
     while (g_running) {
         sem_lock(); int shutdown = g_shm->shutdown; sem_unlock();
@@ -301,16 +350,44 @@ int main(void) {
         /* Emergency — highest priority */
         if (g_want_emergency) { handle_emergency(&cur); continue; }
 
-        /* Pedestrian — interrupts only during green */
+        /* Pedestrian — interrupts during any green phase */
         if (g_want_pedestrian &&
-            (cur == PHASE_NS_GREEN || cur == PHASE_EW_GREEN)) {
+            (cur == PHASE_NS_LEFT_GREEN || cur == PHASE_EW_LEFT_GREEN ||
+             cur == PHASE_NS_GREEN      || cur == PHASE_EW_GREEN)) {
             handle_pedestrian(&cur);
             continue;
         }
 
-        /* Normal cycle */
+        /* Normal cycle state machine */
         switch (cur) {
 
+        /* ---- N-S LEFT-TURN phase ---- */
+        case PHASE_NS_LEFT_GREEN: {
+            int dur = LEFT_GREEN_DURATION;
+            log_event("N-S LEFT-GREEN  dur=%ds", dur);
+            for (int t = 0; t < dur && g_running; t++) {
+                sleep(1);
+                check_msgs();
+                if (g_want_emergency || g_want_pedestrian) break;
+                sem_lock(); g_shm->phase_time_remaining = dur - t - 1; sem_unlock();
+            }
+            if (!g_want_emergency && !g_want_pedestrian) {
+                apply_phase(PHASE_NS_LEFT_YELLOW); cur = PHASE_NS_LEFT_YELLOW;
+            }
+            break;
+        }
+
+        case PHASE_NS_LEFT_YELLOW:
+            for (int t = 0; t < YELLOW_DURATION && g_running; t++) sleep(1);
+            apply_phase(PHASE_ALL_RED_3); cur = PHASE_ALL_RED_3;
+            break;
+
+        case PHASE_ALL_RED_3:
+            for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
+            apply_phase(PHASE_NS_GREEN); cur = PHASE_NS_GREEN;
+            break;
+
+        /* ---- N-S STRAIGHT phase ---- */
         case PHASE_NS_GREEN: {
             int dur = green_duration(NORTH, SOUTH);
             log_event("N-S GREEN  dur=%ds  (N:%d S:%d vehicles)", dur,
@@ -319,9 +396,7 @@ int main(void) {
                 sleep(1);
                 check_msgs();
                 if (g_want_emergency || g_want_pedestrian) break;
-                sem_lock();
-                g_shm->phase_time_remaining = dur - t - 1;
-                sem_unlock();
+                sem_lock(); g_shm->phase_time_remaining = dur - t - 1; sem_unlock();
             }
             if (!g_want_emergency && !g_want_pedestrian) {
                 apply_phase(PHASE_NS_YELLOW); cur = PHASE_NS_YELLOW;
@@ -336,9 +411,36 @@ int main(void) {
 
         case PHASE_ALL_RED_1:
             for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
+            apply_phase(PHASE_EW_LEFT_GREEN); cur = PHASE_EW_LEFT_GREEN;
+            break;
+
+        /* ---- E-W LEFT-TURN phase ---- */
+        case PHASE_EW_LEFT_GREEN: {
+            int dur = LEFT_GREEN_DURATION;
+            log_event("E-W LEFT-GREEN  dur=%ds", dur);
+            for (int t = 0; t < dur && g_running; t++) {
+                sleep(1);
+                check_msgs();
+                if (g_want_emergency || g_want_pedestrian) break;
+                sem_lock(); g_shm->phase_time_remaining = dur - t - 1; sem_unlock();
+            }
+            if (!g_want_emergency && !g_want_pedestrian) {
+                apply_phase(PHASE_EW_LEFT_YELLOW); cur = PHASE_EW_LEFT_YELLOW;
+            }
+            break;
+        }
+
+        case PHASE_EW_LEFT_YELLOW:
+            for (int t = 0; t < YELLOW_DURATION && g_running; t++) sleep(1);
+            apply_phase(PHASE_ALL_RED_4); cur = PHASE_ALL_RED_4;
+            break;
+
+        case PHASE_ALL_RED_4:
+            for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
             apply_phase(PHASE_EW_GREEN); cur = PHASE_EW_GREEN;
             break;
 
+        /* ---- E-W STRAIGHT phase ---- */
         case PHASE_EW_GREEN: {
             int dur = green_duration(EAST, WEST);
             log_event("E-W GREEN  dur=%ds  (E:%d W:%d vehicles)", dur,
@@ -347,9 +449,7 @@ int main(void) {
                 sleep(1);
                 check_msgs();
                 if (g_want_emergency || g_want_pedestrian) break;
-                sem_lock();
-                g_shm->phase_time_remaining = dur - t - 1;
-                sem_unlock();
+                sem_lock(); g_shm->phase_time_remaining = dur - t - 1; sem_unlock();
             }
             if (!g_want_emergency && !g_want_pedestrian) {
                 apply_phase(PHASE_EW_YELLOW); cur = PHASE_EW_YELLOW;
@@ -364,7 +464,7 @@ int main(void) {
 
         case PHASE_ALL_RED_2:
             for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
-            apply_phase(PHASE_NS_GREEN); cur = PHASE_NS_GREEN;
+            apply_phase(PHASE_NS_LEFT_GREEN); cur = PHASE_NS_LEFT_GREEN;
             break;
 
         default:
@@ -377,8 +477,11 @@ int main(void) {
     /* All lights to RED on exit */
     for (int d = 0; d < NUM_DIRECTIONS; d++) {
         Message cmd;
-        sem_lock(); g_shm->light[d] = RED; sem_unlock();
-        build_cmd_message(&cmd, d, RED);
+        sem_lock();
+        g_shm->light[d]      = RED;
+        g_shm->left_light[d] = RED;
+        sem_unlock();
+        build_cmd_message(&cmd, d, RED, RED);
         msg_send(&cmd);
     }
     sem_lock(); g_shm->running = 0; sem_unlock();

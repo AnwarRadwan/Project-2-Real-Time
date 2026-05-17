@@ -240,25 +240,32 @@ const char *dir_str(int dir) {
 
 const char *phase_str(int phase) {
     switch (phase) {
-    case PHASE_NS_GREEN:   return "N-S GREEN";
-    case PHASE_NS_YELLOW:  return "N-S YELLOW";
-    case PHASE_ALL_RED_1:  return "ALL-RED (1)";
-    case PHASE_EW_GREEN:   return "E-W GREEN";
-    case PHASE_EW_YELLOW:  return "E-W YELLOW";
-    case PHASE_ALL_RED_2:  return "ALL-RED (2)";
-    case PHASE_PEDESTRIAN: return "PEDESTRIAN";
-    case PHASE_EMERGENCY:  return "EMERGENCY";
-    default:               return "UNKNOWN";
+    case PHASE_NS_GREEN:       return "N-S GREEN";
+    case PHASE_NS_YELLOW:      return "N-S YELLOW";
+    case PHASE_ALL_RED_1:      return "ALL-RED (1)";
+    case PHASE_EW_GREEN:       return "E-W GREEN";
+    case PHASE_EW_YELLOW:      return "E-W YELLOW";
+    case PHASE_ALL_RED_2:      return "ALL-RED (2)";
+    case PHASE_PEDESTRIAN:     return "PEDESTRIAN";
+    case PHASE_EMERGENCY:      return "EMERGENCY";
+    case PHASE_NS_LEFT_GREEN:  return "N-S LEFT-GREEN";
+    case PHASE_NS_LEFT_YELLOW: return "N-S LEFT-YLW";
+    case PHASE_EW_LEFT_GREEN:  return "E-W LEFT-GREEN";
+    case PHASE_EW_LEFT_YELLOW: return "E-W LEFT-YLW";
+    case PHASE_ALL_RED_3:      return "ALL-RED (3)";
+    case PHASE_ALL_RED_4:      return "ALL-RED (4)";
+    default:                   return "UNKNOWN";
     }
 }
 
-void build_cmd_message(Message *m, int direction, int new_state) {
+void build_cmd_message(Message *m, int direction, int new_state, int left_state) {
     memset(m, 0, sizeof(Message));
-    m->mtype     = MSG_CMD_FOR(direction);
-    m->source    = SRC_CONTROLLER;
-    m->direction = direction;
-    m->value     = new_state;
-    m->timestamp = time(NULL);
-    snprintf(m->message, sizeof(m->message), "CMD: set %s to %s",
-             dir_str(direction), light_str(new_state));
+    m->mtype      = MSG_CMD_FOR(direction);
+    m->source     = SRC_CONTROLLER;
+    m->direction  = direction;
+    m->value      = new_state;
+    m->left_value = left_state;
+    m->timestamp  = time(NULL);
+    snprintf(m->message, sizeof(m->message), "CMD: %s straight=%s left=%s",
+             dir_str(direction), light_str(new_state), light_str(left_state));
 }

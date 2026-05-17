@@ -41,24 +41,34 @@
 /* ------------------------------------------------------------------ */
 /* Traffic phases                                                       */
 /*                                                                      */
-/* Normal cycle: NS_GREEN → NS_YELLOW → ALL_RED_1 →                   */
-/*               EW_GREEN → EW_YELLOW → ALL_RED_2 → (repeat)          */
-/* Special:      PEDESTRIAN, EMERGENCY (interrupt normal cycle)        */
+/* Full cycle (left-turn protected first):                             */
+/*   NS_LEFT_GREEN → NS_LEFT_YELLOW → ALL_RED_3 →                     */
+/*   NS_GREEN      → NS_YELLOW      → ALL_RED_1 →                     */
+/*   EW_LEFT_GREEN → EW_LEFT_YELLOW → ALL_RED_4 →                     */
+/*   EW_GREEN      → EW_YELLOW      → ALL_RED_2 → (repeat)            */
+/* Special: PEDESTRIAN, EMERGENCY (interrupt any green phase)          */
 /* ------------------------------------------------------------------ */
-#define PHASE_NS_GREEN    0
-#define PHASE_NS_YELLOW   1
-#define PHASE_ALL_RED_1   2
-#define PHASE_EW_GREEN    3
-#define PHASE_EW_YELLOW   4
-#define PHASE_ALL_RED_2   5
-#define PHASE_PEDESTRIAN  6
-#define PHASE_EMERGENCY   7
-#define NUM_NORMAL_PHASES 6
+#define PHASE_NS_GREEN        0
+#define PHASE_NS_YELLOW       1
+#define PHASE_ALL_RED_1       2   /* after NS straight, before EW left  */
+#define PHASE_EW_GREEN        3
+#define PHASE_EW_YELLOW       4
+#define PHASE_ALL_RED_2       5   /* after EW straight, before NS left  */
+#define PHASE_PEDESTRIAN      6
+#define PHASE_EMERGENCY       7
+#define PHASE_NS_LEFT_GREEN   8   /* N+S left-turn arrows green         */
+#define PHASE_NS_LEFT_YELLOW  9
+#define PHASE_EW_LEFT_GREEN  10   /* E+W left-turn arrows green         */
+#define PHASE_EW_LEFT_YELLOW 11
+#define PHASE_ALL_RED_3      12   /* after NS left, before NS straight  */
+#define PHASE_ALL_RED_4      13   /* after EW left, before EW straight  */
+#define NUM_NORMAL_PHASES     6
 
 /* ------------------------------------------------------------------ */
 /* Timing (seconds)                                                     */
 /* ------------------------------------------------------------------ */
-#define GREEN_DURATION        10   /* default green phase length       */
+#define GREEN_DURATION        10   /* default straight green length    */
+#define LEFT_GREEN_DURATION    8   /* fixed left-turn arrow hold time  */
 #define YELLOW_DURATION        3   /* mandatory yellow before red      */
 #define ALL_RED_DURATION       2   /* all-red safety gap               */
 #define PEDESTRIAN_DURATION   15   /* walk signal duration             */

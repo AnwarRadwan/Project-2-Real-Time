@@ -34,7 +34,8 @@ typedef struct {
     long   mtype;
     int    source;
     int    direction;
-    int    value;
+    int    value;        /* straight/right signal state (RED/YELLOW/GREEN) */
+    int    left_value;   /* left-turn arrow state       (RED/YELLOW/GREEN) */
     int    priority;
     char   message[128];
     time_t timestamp;
@@ -95,7 +96,9 @@ const char *light_str(int state);       /* RED→"RED", etc.            */
 const char *dir_str(int dir);           /* NORTH→"NORTH", etc.        */
 const char *phase_str(int phase);       /* PHASE_NS_GREEN→"N-S GREEN" */
 
-/* build_cmd_message: fill a Message ready to send to a traffic_light */
-void build_cmd_message(Message *m, int direction, int new_state);
+/* build_cmd_message: fill a Message ready to send to a traffic_light.
+ * new_state  = straight/right signal (RED/YELLOW/GREEN)
+ * left_state = left-turn arrow      (RED/YELLOW/GREEN) */
+void build_cmd_message(Message *m, int direction, int new_state, int left_state);
 
 #endif /* IPC_H */

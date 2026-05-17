@@ -34,10 +34,11 @@
 #include "ipc.h"
 #include "shared.h"
 
-static int                    g_dir     = -1;
-static SharedData            *g_shm     = NULL;
-static int                    g_last    = -1;   /* last known state */
-static volatile sig_atomic_t  g_running =  1;
+static int                    g_dir       = -1;
+static SharedData            *g_shm       = NULL;
+static int                    g_last      = -1;   /* last known straight state */
+static int                    g_last_left = -1;   /* last known left-turn state */
+static volatile sig_atomic_t  g_running   =  1;
 
 static void on_signal(int sig) { (void)sig; g_running = 0; }
 
@@ -77,20 +78,20 @@ static void send_confirm(int state) {
 /* ------------------------------------------------------------------ */
 static void handle_command(const Message *cmd) {
     int requested = cmd->value;
+
     if (requested != RED && requested != YELLOW && requested != GREEN) {
         fprintf(stderr, "[LIGHT-%s] bad command value %d\n",
                 dir_str(g_dir), requested);
         return;
     }
 
-    /* Controller writes SHM before sending the message, so SHM should
-     * already reflect the new state by now. */
+    /* Controller writes SHM before sending the message */
     sem_lock();
-    int actual = g_shm->light[g_dir];
+    int actual      = g_shm->light[g_dir];
+    int left_actual = g_shm->left_light[g_dir];
     sem_unlock();
 
     if (actual != requested) {
-        /* Discrepancy — trust SHM (it is the authoritative state) */
         char buf[128];
         snprintf(buf, sizeof(buf),
                  "CMD/SHM mismatch: cmd=%s shm=%s — using SHM",
@@ -100,19 +101,24 @@ static void handle_command(const Message *cmd) {
         requested = actual;
     }
 
-    if (requested == g_last) return;   /* no change, nothing to do */
+    if (requested == g_last && left_actual == g_last_left)
+        return;   /* no change */
 
-    printf("[LIGHT-%s]  %s  →  %s\n",
+    printf("[LIGHT-%s]  straight:%s→%s  left:%s→%s\n",
            dir_str(g_dir),
-           (g_last == -1) ? "INIT" : light_str(g_last),
-           light_str(requested));
+           (g_last      == -1) ? "INIT" : light_str(g_last),
+           light_str(requested),
+           (g_last_left == -1) ? "INIT" : light_str(g_last_left),
+           light_str(left_actual));
     fflush(stdout);
 
     char buf[128];
-    snprintf(buf, sizeof(buf), "state → %s", light_str(requested));
+    snprintf(buf, sizeof(buf), "straight→%s  left→%s",
+             light_str(requested), light_str(left_actual));
     send_log(buf);
     send_confirm(requested);
-    g_last = requested;
+    g_last      = requested;
+    g_last_left = left_actual;
 }
 
 /* ------------------------------------------------------------------ */
@@ -120,29 +126,34 @@ static void handle_command(const Message *cmd) {
 /* ------------------------------------------------------------------ */
 static void poll_shm(void) {
     sem_lock();
-    int current  = g_shm->light[g_dir];
-    int shutdown = g_shm->shutdown;
+    int current      = g_shm->light[g_dir];
+    int left_current = g_shm->left_light[g_dir];
+    int shutdown     = g_shm->shutdown;
     sem_unlock();
 
     if (shutdown) { g_running = 0; return; }
 
     if (g_last == -1) {
-        /* First poll — record initial state */
-        g_last = current;
-        printf("[LIGHT-%s] initial state: %s\n", dir_str(g_dir), light_str(current));
+        g_last      = current;
+        g_last_left = left_current;
+        printf("[LIGHT-%s] initial: straight=%s left=%s\n",
+               dir_str(g_dir), light_str(current), light_str(left_current));
         fflush(stdout);
         return;
     }
 
-    if (current != g_last) {
-        /* SHM changed but no command arrived — sync and log */
-        printf("[LIGHT-%s] (SHM update) %s → %s\n",
-               dir_str(g_dir), light_str(g_last), light_str(current));
+    if (current != g_last || left_current != g_last_left) {
+        printf("[LIGHT-%s] (SHM update) straight:%s→%s  left:%s→%s\n",
+               dir_str(g_dir),
+               light_str(g_last),      light_str(current),
+               light_str(g_last_left), light_str(left_current));
         fflush(stdout);
         char buf[128];
-        snprintf(buf, sizeof(buf), "SHM update → %s (no cmd)", light_str(current));
+        snprintf(buf, sizeof(buf), "SHM update: straight→%s left→%s",
+                 light_str(current), light_str(left_current));
         send_log(buf);
-        g_last = current;
+        g_last      = current;
+        g_last_left = left_current;
     }
 }
 

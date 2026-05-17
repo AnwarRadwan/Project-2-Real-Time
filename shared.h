@@ -23,7 +23,8 @@
 typedef struct {
 
     /* --- Traffic light states (RED / YELLOW / GREEN per direction) --- */
-    int light[NUM_DIRECTIONS];
+    int light[NUM_DIRECTIONS];       /* straight + right signal          */
+    int left_light[NUM_DIRECTIONS];  /* left-turn arrow signal           */
 
     /* --- Current traffic phase (PHASE_* constant) --- */
     int current_phase;
