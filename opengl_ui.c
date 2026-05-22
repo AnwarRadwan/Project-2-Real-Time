@@ -388,25 +388,40 @@ static void display(void) {
     draw_through_cars(EAST);  draw_left_turn_cars(EAST);
     draw_through_cars(WEST);  draw_left_turn_cars(WEST);
 
-    /* ---- Main straight signals ---- */
-    draw_traffic_light(cx,          cy + 215.0f, NORTH);
-    draw_traffic_light(cx,          cy - 215.0f, SOUTH);
-    draw_traffic_light(cx + 250.0f, cy,          EAST);
-    draw_traffic_light(cx - 250.0f, cy,          WEST);
-
     /*
-     * Left-turn arrow signals — placed on the side toward which each
-     * direction turns left (driver's left = screen-right for N, etc.)
+     * Signal positions — all placed in the grass corners, clear of roads and cars.
      *
-     * NORTH heading south → turns left (East)  → signal right of main
-     * SOUTH heading north → turns left (West)  → signal left of main
-     * EAST  heading west  → turns left (South) → signal below main
-     * WEST  heading east  → turns left (North) → signal above main
+     * Road occupies x=[cx-ROAD_W, cx+ROAD_W], y=[cy-ROAD_W, cy+ROAD_W].
+     *   cx=470  cy=360  ROAD_W=80
+     *
+     * NORTH approach (NW grass corner, x<390, y>440):
+     *   main signal at (350, 530)  — faces northbound traffic
+     *   left signal  at (350, 460) — closer to stop line
+     *
+     * SOUTH approach (SE grass corner, x>550, y<280):
+     *   main signal at (590, 190)  — faces southbound traffic
+     *   left signal  at (590, 255) — closer to stop line
+     *
+     * EAST approach (NE grass corner, x>550, y>440):
+     *   main signal at (720, 480)  — faces eastbound traffic
+     *   left signal  at (630, 480) — closer to stop line
+     *
+     * WEST approach (SW grass corner, x<390, y<280):
+     *   main signal at (220, 240)  — faces westbound traffic
+     *   left signal  at (320, 240) — closer to stop line
      */
-    draw_left_signal(cx + 55.0f,         cy + 215.0f, NORTH);
-    draw_left_signal(cx - 55.0f,         cy - 215.0f, SOUTH);
-    draw_left_signal(cx + 250.0f,        cy - 90.0f,  EAST);
-    draw_left_signal(cx - 250.0f,        cy + 90.0f,  WEST);
+
+    /* ---- Main straight signals ---- */
+    draw_traffic_light(cx - ROAD_W - 40.0f, cy + ROAD_W + 90.0f, NORTH); /* NW grass */
+    draw_traffic_light(cx + ROAD_W + 40.0f, cy - ROAD_W - 90.0f, SOUTH); /* SE grass */
+    draw_traffic_light(cx + ROAD_W + 170.0f, cy + ROAD_W + 40.0f, EAST); /* NE grass */
+    draw_traffic_light(cx - ROAD_W - 170.0f, cy - ROAD_W - 40.0f, WEST); /* SW grass */
+
+    /* ---- Left-turn arrow signals ---- */
+    draw_left_signal(cx - ROAD_W - 40.0f,  cy + ROAD_W + 20.0f, NORTH); /* NW, near stop line */
+    draw_left_signal(cx + ROAD_W + 40.0f,  cy - ROAD_W - 25.0f, SOUTH); /* SE, near stop line */
+    draw_left_signal(cx + ROAD_W + 70.0f,  cy + ROAD_W + 40.0f, EAST);  /* NE, closer to stop */
+    draw_left_signal(cx - ROAD_W - 70.0f,  cy - ROAD_W - 40.0f, WEST);  /* SW, closer to stop */
 
     /* ---- Status bar ---- */
     glColor3f(0.05f, 0.05f, 0.05f);

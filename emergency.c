@@ -111,16 +111,41 @@ int main(int argc, char *argv[]) {
             sleep(EMERGENCY_DURATION + ALL_RED_DURATION + 5);
         }
     } else {
+        printf("[EMRG] Commands: 0=N  1=S  2=E  3=W  p=Pedestrian  -1=quit\n");
+        fflush(stdout);
         while (g_running) {
-            printf("Direction (0-3, -1=quit): ");
+            sem_lock(); int sd = g_shm->shutdown; sem_unlock();
+            if (sd) break;
+
+            printf("Command (0-3 / p / -1): ");
             fflush(stdout);
 
-            int dir;
-            if (scanf("%d", &dir) != 1) break;
-            if (dir == -1) break;
+            char buf[64];
+            if (!fgets(buf, sizeof(buf), stdin)) break;
 
+            /* Pedestrian request */
+            if (buf[0] == 'p' || buf[0] == 'P') {
+                Message m;
+                memset(&m, 0, sizeof(m));
+                m.mtype     = MSG_PEDESTRIAN;
+                m.source    = SRC_PEDESTRIAN;
+                m.direction = -1;
+                m.value     = 1;
+                m.timestamp = time(NULL);
+                snprintf(m.message, sizeof(m.message), "Pedestrian crossing request");
+                msg_send(&m);
+                sem_lock(); g_shm->pedestrian_request = 1; sem_unlock();
+                printf("[EMRG] Pedestrian request sent!\n");
+                fflush(stdout);
+                continue;
+            }
+
+            int dir;
+            if (sscanf(buf, "%d", &dir) != 1) continue;
+            if (dir == -1) break;
             if (dir < 0 || dir >= NUM_DIRECTIONS) {
-                printf("Invalid. Use 0=N 1=S 2=E 3=W\n");
+                printf("[EMRG] Invalid. Use 0=N 1=S 2=E 3=W or p=pedestrian\n");
+                fflush(stdout);
                 continue;
             }
             trigger_emergency(dir);

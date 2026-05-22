@@ -378,13 +378,17 @@ int main(void) {
         }
 
         case PHASE_NS_LEFT_YELLOW:
-            for (int t = 0; t < YELLOW_DURATION && g_running; t++) sleep(1);
-            apply_phase(PHASE_ALL_RED_3); cur = PHASE_ALL_RED_3;
+            for (int t = 0; t < YELLOW_DURATION && g_running; t++) {
+                sleep(1); check_msgs(); if (g_want_emergency) break;
+            }
+            if (!g_want_emergency) { apply_phase(PHASE_ALL_RED_3); cur = PHASE_ALL_RED_3; }
             break;
 
         case PHASE_ALL_RED_3:
-            for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
-            apply_phase(PHASE_NS_GREEN); cur = PHASE_NS_GREEN;
+            for (int t = 0; t < ALL_RED_DURATION && g_running; t++) {
+                sleep(1); check_msgs(); if (g_want_emergency) break;
+            }
+            if (!g_want_emergency) { apply_phase(PHASE_NS_GREEN); cur = PHASE_NS_GREEN; }
             break;
 
         /* ---- N-S STRAIGHT phase ---- */
@@ -405,13 +409,17 @@ int main(void) {
         }
 
         case PHASE_NS_YELLOW:
-            for (int t = 0; t < YELLOW_DURATION && g_running; t++) sleep(1);
-            apply_phase(PHASE_ALL_RED_1); cur = PHASE_ALL_RED_1;
+            for (int t = 0; t < YELLOW_DURATION && g_running; t++) {
+                sleep(1); check_msgs(); if (g_want_emergency) break;
+            }
+            if (!g_want_emergency) { apply_phase(PHASE_ALL_RED_1); cur = PHASE_ALL_RED_1; }
             break;
 
         case PHASE_ALL_RED_1:
-            for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
-            apply_phase(PHASE_EW_LEFT_GREEN); cur = PHASE_EW_LEFT_GREEN;
+            for (int t = 0; t < ALL_RED_DURATION && g_running; t++) {
+                sleep(1); check_msgs(); if (g_want_emergency) break;
+            }
+            if (!g_want_emergency) { apply_phase(PHASE_EW_LEFT_GREEN); cur = PHASE_EW_LEFT_GREEN; }
             break;
 
         /* ---- E-W LEFT-TURN phase ---- */
@@ -431,13 +439,17 @@ int main(void) {
         }
 
         case PHASE_EW_LEFT_YELLOW:
-            for (int t = 0; t < YELLOW_DURATION && g_running; t++) sleep(1);
-            apply_phase(PHASE_ALL_RED_4); cur = PHASE_ALL_RED_4;
+            for (int t = 0; t < YELLOW_DURATION && g_running; t++) {
+                sleep(1); check_msgs(); if (g_want_emergency) break;
+            }
+            if (!g_want_emergency) { apply_phase(PHASE_ALL_RED_4); cur = PHASE_ALL_RED_4; }
             break;
 
         case PHASE_ALL_RED_4:
-            for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
-            apply_phase(PHASE_EW_GREEN); cur = PHASE_EW_GREEN;
+            for (int t = 0; t < ALL_RED_DURATION && g_running; t++) {
+                sleep(1); check_msgs(); if (g_want_emergency) break;
+            }
+            if (!g_want_emergency) { apply_phase(PHASE_EW_GREEN); cur = PHASE_EW_GREEN; }
             break;
 
         /* ---- E-W STRAIGHT phase ---- */
@@ -458,13 +470,17 @@ int main(void) {
         }
 
         case PHASE_EW_YELLOW:
-            for (int t = 0; t < YELLOW_DURATION && g_running; t++) sleep(1);
-            apply_phase(PHASE_ALL_RED_2); cur = PHASE_ALL_RED_2;
+            for (int t = 0; t < YELLOW_DURATION && g_running; t++) {
+                sleep(1); check_msgs(); if (g_want_emergency) break;
+            }
+            if (!g_want_emergency) { apply_phase(PHASE_ALL_RED_2); cur = PHASE_ALL_RED_2; }
             break;
 
         case PHASE_ALL_RED_2:
-            for (int t = 0; t < ALL_RED_DURATION && g_running; t++) sleep(1);
-            apply_phase(PHASE_NS_LEFT_GREEN); cur = PHASE_NS_LEFT_GREEN;
+            for (int t = 0; t < ALL_RED_DURATION && g_running; t++) {
+                sleep(1); check_msgs(); if (g_want_emergency) break;
+            }
+            if (!g_want_emergency) { apply_phase(PHASE_NS_LEFT_GREEN); cur = PHASE_NS_LEFT_GREEN; }
             break;
 
         default:
