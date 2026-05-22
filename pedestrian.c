@@ -4,20 +4,15 @@
  * Pedestrian crossing request process.
  *
  * Two operating modes:
- *   interactive (default): press ENTER in this terminal to request crossing.
- *   automatic (--auto)   : sends a random request every 20–60 seconds.
+ *   interactive (default): press ENTER to send a crossing request.
+ *   automatic   (--auto) : sends a random request every 20-60 seconds.
  *
- * IPC decisions:
- *   MSG_PEDESTRIAN: carries the crossing request to the controller.
- *   SHM pedestrian_request: set here so the safety monitor also sees it.
- *   SHM pedestrian_active : polled to detect when the controller grants
- *                           the walk signal (request fulfilled).
+ * Run in its own terminal:
+ *   ./pedestrian
  *
- *   The process accepts only one request at a time — it waits until
- *   pedestrian_active is cleared before accepting a new one.
- *
- * select() on stdin: avoids blocking on fgets() while still allowing
- * the SHM shutdown flag to be checked every 500 ms.
+ * IPC:
+ *   MSG_PEDESTRIAN: sends crossing request to the controller.
+ *   SHM pedestrian_request / pedestrian_active: set/monitored here.
  */
 
 #include <signal.h>
@@ -53,9 +48,9 @@ static void send_request(void) {
     sem_unlock();
 }
 
-/* Non-blocking check whether ENTER was pressed */
-static int kbhit(void) {
-    struct timeval tv = {0, 0};
+/* select() with timeout: returns 1 if stdin has data within ms milliseconds */
+static int stdin_ready(int ms) {
+    struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
     fd_set fds;
     FD_ZERO(&fds);
     FD_SET(STDIN_FILENO, &fds);
@@ -73,49 +68,43 @@ int main(int argc, char *argv[]) {
     if (!g_shm) { fprintf(stderr, "[PED] ipc_attach failed\n"); return 1; }
 
     printf("[PED] pedestrian process started (pid=%d)\n", getpid());
-    if (auto_mode)
-        printf("[PED] auto mode — random requests every 20-60 s\n");
-    else
-        printf("[PED] interactive — press ENTER to request crossing\n");
     fflush(stdout);
 
-    int pending = 0;   /* 1 = we sent a request, waiting for acknowledgement */
+    int pending     = 0;
+    int walk_shown  = 0;
 
-    while (g_running) {
-        sem_lock();
-        int shutdown = g_shm->shutdown;
-        int req      = g_shm->pedestrian_request;
-        int active   = g_shm->pedestrian_active;
-        sem_unlock();
-        if (shutdown) break;
+    if (auto_mode) {
+        printf("[PED] auto mode — random requests every 20-60 s\n");
+        fflush(stdout);
 
-        /* Detect when a previous request has been fully served */
-        if (pending && !req && !active) {
-            pending = 0;
-            printf("[PED] crossing complete — ready for next request\n");
-            fflush(stdout);
-        }
+        while (g_running) {
+            sem_lock();
+            int sd     = g_shm->shutdown;
+            int active = g_shm->pedestrian_active;
+            int req    = g_shm->pedestrian_request;
+            sem_unlock();
+            if (sd) break;
 
-        /* Show status once when walk signal first becomes active */
-        static int walk_printed = 0;
-        if (active && !walk_printed) {
-            printf("[PED] ** WALK SIGNAL ACTIVE **\n");
-            fflush(stdout);
-            walk_printed = 1;
-        } else if (!active) {
-            walk_printed = 0;
-        }
+            if (pending && !req && !active) {
+                pending   = 0;
+                walk_shown = 0;
+                printf("[PED] crossing complete\n");
+                fflush(stdout);
+            }
+            if (active && !walk_shown) {
+                printf("[PED] ** WALK SIGNAL ACTIVE **\n");
+                fflush(stdout);
+                walk_shown = 1;
+            }
 
-        if (!pending) {
-            if (auto_mode) {
-                /* Automatic mode: sleep 20-60 s then fire */
+            if (!pending) {
                 int wait = 20 + rand() % 40;
                 printf("[PED] next automatic request in %d seconds\n", wait);
                 fflush(stdout);
                 for (int t = 0; t < wait && g_running; t++) {
                     sleep(1);
-                    sem_lock(); int sd = g_shm->shutdown; sem_unlock();
-                    if (sd) break;
+                    sem_lock(); int sd2 = g_shm->shutdown; sem_unlock();
+                    if (sd2) break;
                 }
                 if (!g_running) break;
                 printf("[PED] sending automatic pedestrian request!\n");
@@ -123,20 +112,55 @@ int main(int argc, char *argv[]) {
                 send_request();
                 pending = 1;
             } else {
-                /* Interactive mode: non-blocking key check */
-                if (kbhit()) {
-                    char buf[64];
-                    if (fgets(buf, sizeof(buf), stdin)) {
-                        printf("[PED] request sent — waiting for walk signal...\n");
-                        fflush(stdout);
-                        send_request();
-                        pending = 1;
-                    }
-                }
+                usleep(500 * 1000);
             }
         }
 
-        usleep(500 * 1000);   /* 500 ms poll interval */
+    } else {
+        /* Interactive mode — runs in its own terminal.
+         * Press ENTER to request crossing.  Ctrl+C to quit. */
+        printf("[PED] Pedestrian mode  —  press ENTER to request crossing\n");
+        printf("[PED] (Ctrl+C to quit)\n\n");
+        fflush(stdout);
+
+        while (g_running) {
+            sem_lock();
+            int sd     = g_shm->shutdown;
+            int active = g_shm->pedestrian_active;
+            int req    = g_shm->pedestrian_request;
+            sem_unlock();
+            if (sd) break;
+
+            /* Detect walk-signal activation */
+            if (active && !walk_shown) {
+                printf("\n[PED] ** WALK SIGNAL ACTIVE **\n");
+                fflush(stdout);
+                walk_shown = 1;
+            }
+
+            /* Detect crossing complete */
+            if (pending && !req && !active) {
+                pending    = 0;
+                walk_shown = 0;
+                printf("[PED] Crossing complete.\n\n");
+                printf("Press ENTER to request next crossing: ");
+                fflush(stdout);
+            }
+
+            if (!pending) {
+                /* Wait up to 300 ms for keypress, then re-check SHM */
+                if (stdin_ready(300)) {
+                    char buf[16];
+                    if (!fgets(buf, sizeof(buf), stdin)) break;
+                    send_request();
+                    pending = 1;
+                    printf("[PED] Request sent — waiting for walk signal...\n");
+                    fflush(stdout);
+                }
+            } else {
+                usleep(300 * 1000);
+            }
+        }
     }
 
     printf("[PED] pedestrian process shutting down\n");

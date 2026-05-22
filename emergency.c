@@ -4,19 +4,15 @@
  * Emergency vehicle detection process.
  *
  * Two operating modes:
- *   interactive (default): enter direction number (0-3) and press ENTER.
+ *   interactive (default): type a direction number (0-3) and press ENTER.
  *   automatic   (--auto) : random emergency every 45-120 seconds.
  *
- * IPC decisions:
- *   MSG_EMERGENCY: sent with the approaching direction so the controller
- *   immediately preempts the normal cycle (response ≤ 1 s).
+ * Run in its own terminal:
+ *   ./emergency
  *
- *   SHM emergency_mode / emergency_direction: set here before sending
- *   the message so the safety monitor detects the emergency state even
- *   if the controller is momentarily busy.
- *
- *   After triggering, this process waits EMERGENCY_DURATION + margin
- *   before allowing the next event (prevents overlapping emergencies).
+ * IPC:
+ *   Sets SHM emergency_mode immediately so the safety monitor sees it.
+ *   Sends MSG_EMERGENCY so the controller preempts the cycle (≤ 100 ms).
  */
 
 #include <signal.h>
@@ -36,13 +32,11 @@ static volatile sig_atomic_t  g_running = 1;
 static void on_signal(int sig) { (void)sig; g_running = 0; }
 
 static void trigger_emergency(int dir) {
-    /* Set SHM immediately — safety monitor sees it without delay */
     sem_lock();
     g_shm->emergency_mode      = 1;
     g_shm->emergency_direction = dir;
     sem_unlock();
 
-    /* Send message to controller */
     Message m;
     memset(&m, 0, sizeof(m));
     m.mtype     = MSG_EMERGENCY;
@@ -55,15 +49,14 @@ static void trigger_emergency(int dir) {
              "EMERGENCY vehicle approaching from %s!", dir_str(dir));
     msg_send(&m);
 
-    /* Log it */
-    Message log;
-    memset(&log, 0, sizeof(log));
-    log.mtype     = MSG_LOG;
-    log.source    = SRC_EMERGENCY;
-    log.timestamp = time(NULL);
-    snprintf(log.message, sizeof(log.message),
+    Message log_m;
+    memset(&log_m, 0, sizeof(log_m));
+    log_m.mtype     = MSG_LOG;
+    log_m.source    = SRC_EMERGENCY;
+    log_m.timestamp = time(NULL);
+    snprintf(log_m.message, sizeof(log_m.message),
              "Emergency vehicle from %s — preempting traffic", dir_str(dir));
-    msg_send(&log);
+    msg_send(&log_m);
 
     printf("[EMRG] *** EMERGENCY from %-5s — controller notified ***\n",
            dir_str(dir));
@@ -81,15 +74,11 @@ int main(int argc, char *argv[]) {
     if (!g_shm) { fprintf(stderr, "[EMRG] ipc_attach failed\n"); return 1; }
 
     printf("[EMRG] emergency process started (pid=%d)\n", getpid());
-    if (auto_mode)
-        printf("[EMRG] auto mode — random emergencies every 45-120 s\n");
-    else {
-        printf("[EMRG] interactive mode\n");
-        printf("[EMRG] Enter direction (0=N 1=S 2=E 3=W) then ENTER, -1 to quit\n");
-    }
     fflush(stdout);
 
     if (auto_mode) {
+        printf("[EMRG] auto mode — random emergencies every 45-120 s\n");
+        fflush(stdout);
         while (g_running) {
             sem_lock(); int sd = g_shm->shutdown; sem_unlock();
             if (sd) break;
@@ -106,45 +95,27 @@ int main(int argc, char *argv[]) {
             if (!g_running) break;
 
             trigger_emergency(rand() % NUM_DIRECTIONS);
-
-            /* Wait for the emergency to fully clear before the next one */
             sleep(EMERGENCY_DURATION + ALL_RED_DURATION + 5);
         }
     } else {
-        printf("[EMRG] Commands: 0=N  1=S  2=E  3=W  p=Pedestrian  -1=quit\n");
+        printf("[EMRG] Emergency mode  —  0=NORTH  1=SOUTH  2=EAST  3=WEST\n");
+        printf("[EMRG] Type a direction number and press ENTER (Ctrl+C to quit)\n\n");
         fflush(stdout);
+
         while (g_running) {
             sem_lock(); int sd = g_shm->shutdown; sem_unlock();
             if (sd) break;
 
-            printf("Command (0-3 / p / -1): ");
+            printf("Direction (0-3): ");
             fflush(stdout);
 
-            char buf[64];
+            char buf[32];
             if (!fgets(buf, sizeof(buf), stdin)) break;
-
-            /* Pedestrian request */
-            if (buf[0] == 'p' || buf[0] == 'P') {
-                Message m;
-                memset(&m, 0, sizeof(m));
-                m.mtype     = MSG_PEDESTRIAN;
-                m.source    = SRC_PEDESTRIAN;
-                m.direction = -1;
-                m.value     = 1;
-                m.timestamp = time(NULL);
-                snprintf(m.message, sizeof(m.message), "Pedestrian crossing request");
-                msg_send(&m);
-                sem_lock(); g_shm->pedestrian_request = 1; sem_unlock();
-                printf("[EMRG] Pedestrian request sent!\n");
-                fflush(stdout);
-                continue;
-            }
 
             int dir;
             if (sscanf(buf, "%d", &dir) != 1) continue;
-            if (dir == -1) break;
             if (dir < 0 || dir >= NUM_DIRECTIONS) {
-                printf("[EMRG] Invalid. Use 0=N 1=S 2=E 3=W or p=pedestrian\n");
+                printf("[EMRG] Invalid — use 0=N  1=S  2=E  3=W\n");
                 fflush(stdout);
                 continue;
             }

@@ -20,7 +20,6 @@
  */
 
 #include <errno.h>
-#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,22 +52,6 @@ static pid_t spawn(const char *path, char *const argv[]) {
     return pid;
 }
 
-/* Spawn with stdin redirected from /dev/null (process cannot read keyboard) */
-static pid_t spawn_no_stdin(const char *path, char *const argv[]) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        int fd = open("/dev/null", O_RDONLY);
-        if (fd >= 0) { dup2(fd, STDIN_FILENO); close(fd); }
-        execv(path, argv);
-        perror(path);
-        exit(1);
-    }
-    if (pid < 0) { perror("fork"); return -1; }
-    g_pids[g_npids++] = pid;
-    printf("[MAIN] started %-22s pid=%d\n", path, pid);
-    fflush(stdout);
-    return pid;
-}
 
 static void shutdown_all(void) {
     printf("\n[MAIN] shutdown — signalling all child processes...\n");
@@ -150,15 +133,13 @@ int main(int argc, char *argv[]) {
     if (auto_mode) {
         char *a[] = {"./pedestrian", "--auto", NULL}; spawn("./pedestrian", a);
     } else {
-        /* In interactive mode, emergency.c owns stdin (handles 'p' for pedestrian).
-         * Redirect pedestrian's stdin to /dev/null so it doesn't race for keyboard input. */
-        char *a[] = {"./pedestrian", NULL}; spawn_no_stdin("./pedestrian", a);
+        printf("[MAIN] Run  ./pedestrian  in a separate terminal to request crossings\n");
     }
 
     if (auto_mode) {
         char *a[] = {"./emergency", "--auto", NULL};  spawn("./emergency", a);
     } else {
-        char *a[] = {"./emergency", NULL};            spawn("./emergency", a);
+        printf("[MAIN] Run  ./emergency   in a separate terminal to trigger emergencies\n");
     }
 
     { char *a[] = {"./safety_monitor", NULL}; spawn("./safety_monitor", a); }
