@@ -46,6 +46,7 @@ static volatile sig_atomic_t  g_running = 1;
 static int g_want_pedestrian = 0;
 static int g_want_emergency  = 0;
 static int g_emergency_dir   = -1;
+static int g_pedestrian_dir  = 0;
 
 static void on_signal(int sig) { (void)sig; g_running = 0; }
 
@@ -174,9 +175,12 @@ static void check_msgs(void) {
     while (msg_recv(&m, MSG_PEDESTRIAN, 0) > 0) {
         if (!g_want_pedestrian && !g_want_emergency) {
             g_want_pedestrian = 1;
-            log_event("Pedestrian request received — will serve at next opportunity");
+            g_pedestrian_dir  = m.direction;
+            log_event("Pedestrian request [%s] received — will serve at next opportunity",
+                      dir_str(m.direction));
             sem_lock();
-            g_shm->pedestrian_request = 1;
+            g_shm->pedestrian_request   = 1;
+            g_shm->pedestrian_direction = m.direction;
             sem_unlock();
         }
     }
@@ -316,10 +320,12 @@ static void handle_emergency(int *cur) {
 
 /* ------------------------------------------------------------------ */
 /* Handle pedestrian: safe clear → walk signal → resume               */
+/* If an emergency fires mid-crossing: preempt, then resume remaining */
 /* ------------------------------------------------------------------ */
 static void handle_pedestrian(int *cur) {
     g_want_pedestrian = 0;
-    log_event("Handling PEDESTRIAN — clearing intersection");
+    int ped_dir = g_pedestrian_dir;
+    log_event("Handling PEDESTRIAN [%s] — clearing intersection", dir_str(ped_dir));
 
     safe_to_allred(*cur);
     if (!g_running) return;
@@ -327,10 +333,38 @@ static void handle_pedestrian(int *cur) {
     apply_phase(PHASE_PEDESTRIAN);
     *cur = PHASE_PEDESTRIAN;
 
-    for (int t = 0; t < PEDESTRIAN_DURATION * TICKS_PER_SEC && g_running; t++) {
+    int ticks_left = PEDESTRIAN_DURATION * TICKS_PER_SEC;
+
+    while (ticks_left > 0 && g_running) {
         usleep(TICK_US);
         check_msgs();
-        if (g_want_emergency) return;
+
+        if (g_want_emergency) {
+            int secs_left = ticks_left / TICKS_PER_SEC;
+            log_event("Emergency interrupts pedestrian crossing — %ds remaining",
+                      secs_left);
+
+            /* Emergency takes priority — handle it fully */
+            handle_emergency(cur);
+
+            if (secs_left > 0 && g_running) {
+                /* Restore pedestrian direction (emergency phase cleared it) */
+                sem_lock();
+                g_shm->pedestrian_direction = ped_dir;
+                sem_unlock();
+
+                log_event("Resuming PEDESTRIAN [%s] — %ds remaining",
+                          dir_str(ped_dir), secs_left);
+                apply_phase(PHASE_PEDESTRIAN);
+                *cur       = PHASE_PEDESTRIAN;
+                ticks_left = secs_left * TICKS_PER_SEC;
+            } else {
+                ticks_left = 0;
+            }
+            continue;
+        }
+
+        ticks_left--;
     }
 
     apply_phase(PHASE_ALL_RED_1);

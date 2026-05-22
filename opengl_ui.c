@@ -345,24 +345,55 @@ static void draw_intersection(void) {
     glEnd();
     glLineWidth(1.0f);
 
-    /* Pedestrian crossing zebra stripes */
+    /* Pedestrian crossing zebra stripes — direction-specific */
     if (g_snap.pedestrian_active) {
-        int blink = (g_tick / (FPS / 2)) % 2;
-        float alpha = blink ? 0.85f : 0.45f;
+        int   blink = (g_tick / (FPS / 2)) % 2;
+        float alpha = blink ? 0.90f : 0.50f;
+        float sw    = 9.0f, sg = 13.0f;   /* stripe width, gap */
+        int   ns    = 4;                   /* number of stripes */
+
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glColor4f(1.0f, 1.0f, 1.0f, alpha);
-        float stripe_h = 10.0f, stripe_gap = 16.0f;
-        for (int i = 0; i < 4; i++) {
-            float sy = cy - ROAD_W + 8.0f + (float)i * stripe_gap;
-            glBegin(GL_QUADS);
-            glVertex2f(cx-ROAD_W-55,sy);    glVertex2f(cx-ROAD_W,sy);
-            glVertex2f(cx-ROAD_W,sy+stripe_h); glVertex2f(cx-ROAD_W-55,sy+stripe_h);
-            glEnd();
-            glBegin(GL_QUADS);
-            glVertex2f(cx+ROAD_W,sy);    glVertex2f(cx+ROAD_W+55,sy);
-            glVertex2f(cx+ROAD_W+55,sy+stripe_h); glVertex2f(cx+ROAD_W,sy+stripe_h);
-            glEnd();
+
+        switch (g_snap.pedestrian_direction) {
+        case NORTH: /* horizontal stripes just above the intersection */
+            for (int i = 0; i < ns; i++) {
+                float sy = cy + ROAD_W + 5.0f + (float)i * (sw + sg);
+                glBegin(GL_QUADS);
+                glVertex2f(cx - ROAD_W, sy);         glVertex2f(cx + ROAD_W, sy);
+                glVertex2f(cx + ROAD_W, sy + sw);    glVertex2f(cx - ROAD_W, sy + sw);
+                glEnd();
+            }
+            break;
+        case SOUTH: /* horizontal stripes just below the intersection */
+            for (int i = 0; i < ns; i++) {
+                float sy = cy - ROAD_W - 5.0f - (float)i * (sw + sg) - sw;
+                glBegin(GL_QUADS);
+                glVertex2f(cx - ROAD_W, sy);         glVertex2f(cx + ROAD_W, sy);
+                glVertex2f(cx + ROAD_W, sy + sw);    glVertex2f(cx - ROAD_W, sy + sw);
+                glEnd();
+            }
+            break;
+        case EAST: /* vertical stripes just to the right of the intersection */
+            for (int i = 0; i < ns; i++) {
+                float sx = cx + ROAD_W + 5.0f + (float)i * (sw + sg);
+                glBegin(GL_QUADS);
+                glVertex2f(sx,      cy - ROAD_W); glVertex2f(sx + sw, cy - ROAD_W);
+                glVertex2f(sx + sw, cy + ROAD_W); glVertex2f(sx,      cy + ROAD_W);
+                glEnd();
+            }
+            break;
+        case WEST: /* vertical stripes just to the left of the intersection */
+            for (int i = 0; i < ns; i++) {
+                float sx = cx - ROAD_W - 5.0f - (float)i * (sw + sg) - sw;
+                glBegin(GL_QUADS);
+                glVertex2f(sx,      cy - ROAD_W); glVertex2f(sx + sw, cy - ROAD_W);
+                glVertex2f(sx + sw, cy + ROAD_W); glVertex2f(sx,      cy + ROAD_W);
+                glEnd();
+            }
+            break;
+        default: break;
         }
         glDisable(GL_BLEND);
     }
@@ -416,15 +447,24 @@ static void display(void) {
              g_snap.vehicle_count[EAST],  g_snap.vehicle_count[WEST]);
     draw_text18(10.0f, WIN_H - 30.0f, status);
 
-    /* ---- Pedestrian WALK label ---- */
+    /* ---- Pedestrian WALK label with direction ---- */
     if (g_snap.pedestrian_active) {
         int blink = (g_tick / (FPS / 2)) % 2;
-        if (blink) { glColor3f(1.0f,1.0f,0.0f); draw_text18(cx-22.0f,cy+8.0f,"WALK"); }
+        if (blink) {
+            glColor3f(1.0f, 1.0f, 0.0f);
+            char wbuf[32];
+            snprintf(wbuf, sizeof(wbuf), "WALK [%s]",
+                     dir_str(g_snap.pedestrian_direction));
+            draw_text18(cx - 42.0f, cy + 8.0f, wbuf);
+        }
     }
 
     if (g_snap.pedestrian_request && !g_snap.pedestrian_active) {
         glColor3f(1.0f, 0.55f, 0.0f);
-        draw_text(cx - 32.0f, cy + 95.0f, "PED REQUEST");
+        char preqbuf[48];
+        snprintf(preqbuf, sizeof(preqbuf), "PED REQUEST [%s]",
+                 dir_str(g_snap.pedestrian_direction));
+        draw_text(cx - 48.0f, cy + 95.0f, preqbuf);
     }
 
     /* ---- Emergency overlay ---- */
