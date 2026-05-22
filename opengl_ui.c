@@ -469,6 +469,13 @@ static void display(void) {
 
     /* ---- Emergency overlay ---- */
     if (g_snap.emergency_mode) {
+        /* Derive direction from whichever light is GREEN — guaranteed correct
+           even across binary reloads, since light[] is always at offset 0. */
+        int emdir = g_snap.emergency_direction;
+        for (int d = 0; d < NUM_DIRECTIONS; d++) {
+            if (g_snap.light[d] == GREEN) { emdir = d; break; }
+        }
+
         int blink = (g_tick / (FPS / 5)) % 2;
         if (blink) {
             glEnable(GL_BLEND);
@@ -479,8 +486,7 @@ static void display(void) {
         }
         glColor3f(1.0f, 0.25f, 0.25f);
         char emsg[64];
-        snprintf(emsg, sizeof(emsg), "*** EMERGENCY: %s ***",
-                 dir_str(g_snap.emergency_direction));
+        snprintf(emsg, sizeof(emsg), "*** EMERGENCY: %s ***", dir_str(emdir));
         draw_text18(cx - 90.0f, WIN_H - 68.0f, emsg);
     }
 
